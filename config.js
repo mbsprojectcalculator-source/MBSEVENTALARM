@@ -1,6 +1,6 @@
 window.ALARM_REMINDER_CONFIG = {
   // Ignored in Firebase mode. Apps Script now runs only as a scheduled Gmail worker.
-  appsScriptUrl: "",
+  appsScriptUrl: "https://script.google.com/macros/s/AKfycbwsNAPdAv-d4V_U6k3AIGBmJxORjB2DNRIsA1MrUhiVner6X2OuupuadBSyvmVCODGO/exec",
 
   dataBackend: "firebase",
   firebase: {
