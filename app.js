@@ -123,6 +123,7 @@ import {
     dom.soundButton = document.getElementById("soundButton");
     dom.adminDialog = document.getElementById("adminDialog");
     dom.adminMessage = document.getElementById("adminMessage");
+    dom.adminGrid = document.querySelector(".admin-grid");
     dom.loginForm = document.getElementById("loginForm");
     dom.logoutButton = document.getElementById("logoutButton");
     dom.eventForm = document.getElementById("eventForm");
@@ -1345,6 +1346,7 @@ import {
       const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
       state.firebaseUser = credential.user;
       updateAuthUi();
+      setAdminView("all");
       dom.loginForm.reset();
       showAdminMessage("Logged in. Admin actions are unlocked on this browser.", true);
       await loadEvents({ silent: true });
@@ -1371,6 +1373,8 @@ import {
 
       const eventRef = doc(firestore, "events", id);
       const existing = await getDoc(eventRef);
+      const existingData = existing.exists() ? existing.data() : {};
+      const hasNoticeTargets = recipientIds.length > 0 || recipientGroupIds.length > 0;
       const record = {
         id,
         title: title.slice(0, 120),
@@ -1396,10 +1400,22 @@ import {
       if (!existing.exists()) {
         record.createdAt = serverTimestamp();
         record.completedOccurrenceKeys = [];
+        record.setupNoticeStatus = hasNoticeTargets ? "pending" : "skipped";
+        record.setupNoticeRequestedAt = serverTimestamp();
+        record.setupNoticeRequestedBy = currentAdminEmail();
+      } else if (
+        hasNoticeTargets &&
+        !["pending", "sent"].includes(String(existingData.setupNoticeStatus || "").toLowerCase())
+      ) {
+        record.setupNoticeStatus = "pending";
+        record.setupNoticeRequestedAt = serverTimestamp();
+        record.setupNoticeRequestedBy = currentAdminEmail();
       }
 
       await setDoc(eventRef, record, { merge: true });
-      return "Event saved.";
+      return existing.exists()
+        ? "Event saved."
+        : "Event saved. Setup notice will be emailed by the next worker check.";
     });
   }
 
@@ -1741,7 +1757,9 @@ import {
     if (!disabled) updateAuthUi();
   }
 
-  function openAdminDialog() {
+  function openAdminDialog(view = "") {
+    const requestedView = typeof view === "string" ? view : "";
+    setAdminView(requestedView || (isAdminLoggedIn() ? "all" : "login"));
     if (typeof dom.adminDialog.showModal === "function") {
       dom.adminDialog.showModal();
     } else {
@@ -1750,40 +1768,58 @@ import {
     refreshIcons();
   }
 
+  function setAdminView(view) {
+    const panels = {
+      event: dom.eventForm,
+      contact: dom.recipientForm,
+      group: dom.groupForm,
+      complete: dom.completeCycleForm,
+      archive: dom.archiveEventForm
+    };
+    const mode = view || "all";
+    const showAll = mode === "all";
+    const hideAll = mode === "login";
+
+    Object.entries(panels).forEach(([key, panel]) => {
+      panel.classList.toggle("is-hidden", hideAll || (!showAll && key !== mode));
+    });
+    dom.adminGrid.classList.toggle("is-single-view", !showAll);
+  }
+
   function startNewEvent() {
     if (!isAdminLoggedIn()) {
-      openAdminDialog();
+      openAdminDialog("login");
       showAdminMessage("Login first to add events.", false);
       return;
     }
 
     clearEventForm();
-    openAdminDialog();
+    openAdminDialog("event");
     showAdminMessage("New event form is ready.", true);
   }
 
   function startNewContact() {
     if (!isAdminLoggedIn()) {
-      openAdminDialog();
+      openAdminDialog("login");
       showAdminMessage("Login first to add contacts.", false);
       return;
     }
 
     dom.recipientForm.reset();
-    openAdminDialog();
+    openAdminDialog("contact");
     showAdminMessage("New contact form is ready.", true);
   }
 
   function startNewGroup() {
     if (!isAdminLoggedIn()) {
-      openAdminDialog();
+      openAdminDialog("login");
       showAdminMessage("Login first to add groups.", false);
       return;
     }
 
     dom.groupForm.reset();
     renderGroupContactPicker([]);
-    openAdminDialog();
+    openAdminDialog("group");
     showAdminMessage("New group form is ready.", true);
   }
 
@@ -1797,12 +1833,12 @@ import {
 
   function loadEventIntoForm(event) {
     if (!isAdminLoggedIn()) {
-      openAdminDialog();
+      openAdminDialog("login");
       showAdminMessage("Login first to edit events.", false);
       return;
     }
 
-    openAdminDialog();
+    openAdminDialog("event");
     dom.eventForm.id.value = event.id;
     dom.completeCycleForm.id.value = event.id;
     dom.archiveEventForm.id.value = event.id;
@@ -1836,14 +1872,14 @@ import {
   }
 
   function loadEventIntoCompleteForm(event) {
-    openAdminDialog();
+    openAdminDialog("complete");
     dom.completeCycleForm.id.value = event.id;
     dom.archiveEventForm.id.value = event.id;
     showAdminMessage(`Ready to mark "${event.title}" done for this cycle.`, true);
   }
 
   function loadEventIntoArchiveForm(event) {
-    openAdminDialog();
+    openAdminDialog("archive");
     dom.archiveEventForm.id.value = event.id;
     dom.completeCycleForm.id.value = event.id;
     showAdminMessage(`Ready to archive "${event.title}". Press Archive to confirm.`, true);
@@ -1967,11 +2003,13 @@ import {
       if (firebaseAuth) await signOut(firebaseAuth);
       state.firebaseUser = null;
       updateAuthUi();
+      setAdminView("login");
       showAdminMessage("Logged out. You are browsing as guest.", true);
       return;
     }
 
     clearAdminSession();
+    setAdminView("login");
     showAdminMessage("Logged out. You are browsing as guest.", true);
   }
 

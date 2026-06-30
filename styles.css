@@ -1012,6 +1012,14 @@ label {
   padding: 18px;
 }
 
+.admin-grid.is-single-view {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-grid.is-single-view .compact-panel {
+  grid-column: auto;
+}
+
 .tool-panel {
   display: grid;
   gap: 14px;
