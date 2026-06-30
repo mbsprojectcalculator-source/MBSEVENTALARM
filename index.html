@@ -88,7 +88,7 @@
 
           <div id="setupNotice" class="notice toolbar-notice">
             <i data-lucide="plug-zap"></i>
-            <span>Connect your Apps Script Web App URL in config.js to load events.</span>
+            <span>Firebase data is not reachable. Check config.js and Firestore rules.</span>
           </div>
         </div>
       </aside>
@@ -161,7 +161,7 @@
           <div id="emptyState" class="empty-state">
             <i data-lucide="calendar-clock"></i>
             <h3>No public events yet</h3>
-            <p>Use Admin to add the first reminder after connecting Apps Script.</p>
+            <p>Login as Admin to add the first reminder.</p>
           </div>
         </section>
       </main>
@@ -181,6 +181,10 @@
       <div id="adminMessage" class="admin-message" role="status"></div>
 
       <form id="loginForm" class="session-panel">
+        <label>
+          Admin email
+          <input name="email" type="email" autocomplete="username" value="mbsprojectcalculator@gmail.com">
+        </label>
         <label>
           Admin password
           <input name="password" type="password" autocomplete="current-password">
@@ -421,6 +425,6 @@
 
     <script src="config.js"></script>
     <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>

@@ -1,11 +1,36 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  getFirestore,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
 (() => {
   "use strict";
 
   const config = Object.assign(
     {
       appsScriptUrl: "",
+      dataBackend: "appsScript",
+      firebase: null,
+      adminEmails: [],
       timezone: "Asia/Singapore",
       timeZoneOffset: "+08:00",
+      requestTimeoutMs: 60000,
       refreshMs: 60000,
       alarmWindowMinutes: 60
     },
@@ -13,9 +38,21 @@
   );
 
   const ADMIN_SESSION_KEY = "alarmReminderAdminSession";
+  const firebaseMode = config.dataBackend === "firebase";
+  const adminEmails = (config.adminEmails || []).map((email) => String(email).trim().toLowerCase()).filter(Boolean);
+  let firebaseApp = null;
+  let firebaseAuth = null;
+  let firestore = null;
+
+  if (firebaseMode && config.firebase && config.firebase.projectId) {
+    firebaseApp = initializeApp(config.firebase);
+    firebaseAuth = getAuth(firebaseApp);
+    firestore = getFirestore(firebaseApp);
+  }
 
   const state = {
     events: [],
+    publicContacts: [],
     systemStatus: null,
     calendarMonth: startOfMonth(new Date()),
     selectedCalendarDate: "",
@@ -26,7 +63,10 @@
     alarmInterval: null,
     audioUnlocked: false,
     pendingSubmit: false,
+    pendingSubmitTimer: null,
     loadTimer: null,
+    firebaseUser: null,
+    authReady: !firebaseMode,
     adminToken: "",
     adminExpiresAt: 0
   };
@@ -39,6 +79,7 @@
     mapDom();
     loadAdminSession();
     bindEvents();
+    initFirebaseAuth();
     setDefaultEventDateTime();
     updateAuthUi();
     renderSystemStatus();
@@ -48,13 +89,23 @@
     setInterval(tickClock, 1000);
     setInterval(checkAlarms, 5000);
 
-    if (config.appsScriptUrl) {
+    if (hasDataBackend()) {
       loadEvents();
       state.loadTimer = setInterval(loadEvents, Number(config.refreshMs) || 60000);
     } else {
       renderEvents();
       setStatus("Not connected", "muted");
     }
+  }
+
+  function initFirebaseAuth() {
+    if (!firebaseMode || !firebaseAuth) return;
+
+    onAuthStateChanged(firebaseAuth, (user) => {
+      state.firebaseUser = user;
+      state.authReady = true;
+      updateAuthUi();
+    });
   }
 
   function mapDom() {
@@ -150,6 +201,11 @@
   }
 
   async function loadEvents(options = {}) {
+    if (firebaseMode) {
+      await loadFirebaseData(options);
+      return;
+    }
+
     if (!config.appsScriptUrl) {
       renderEvents();
       showNotice(true);
@@ -177,16 +233,118 @@
       showNotice(false);
     } catch (error) {
       setStatus("Load failed", "error");
-      showAdminMessage(error.message, false);
+      if (options.manual || options.showErrors) {
+        showAdminMessage(appsScriptTimeoutMessage(error), false);
+      }
       state.systemStatus = Object.assign(normalizeSystemStatus(null), {
         status: "error",
-        detail: error.message,
-        lastError: error.message
+        detail: appsScriptTimeoutMessage(error),
+        lastError: appsScriptTimeoutMessage(error)
       });
       renderSystemStatus();
       renderCalendar();
       renderEvents();
     }
+  }
+
+  async function loadFirebaseData(options = {}) {
+    if (!firestore) {
+      renderEvents();
+      showNotice(true);
+      setStatus("Firebase setup", "error");
+      state.systemStatus = Object.assign(normalizeSystemStatus(null), {
+        status: "error",
+        detail: "Add Firebase config in config.js before loading events.",
+        lastError: "Firebase is not initialized."
+      });
+      renderSystemStatus();
+      renderCalendar();
+      return;
+    }
+
+    setStatus(options.manual ? "Refreshing" : "Loading", "muted");
+
+    try {
+      const [eventsSnapshot, contactsSnapshot, systemSnapshot] = await Promise.all([
+        getDocs(query(collection(firestore, "events"), where("active", "==", true))),
+        getDocs(query(collection(firestore, "publicContacts"), where("active", "==", true))),
+        getDoc(doc(firestore, "system", "status"))
+      ]);
+
+      const publicContacts = eventsFromSnapshot(contactsSnapshot).map(normalizePublicContactForStore);
+      state.publicContacts = publicContacts;
+      state.systemStatus = normalizeSystemStatus(systemSnapshot.exists() ? systemSnapshot.data() : null);
+      state.events = eventsFromSnapshot(eventsSnapshot)
+        .map((item) => attachPublicContacts(item, publicContacts))
+        .map(normalizeEvent)
+        .sort(sortByNextOccurrence);
+
+      ensureDefaultCalendarSelection();
+      renderSystemStatus();
+      renderCalendar();
+      renderEvents();
+      checkAlarms();
+      setStatus("Firebase", "ok");
+      dom.lastUpdated.textContent = `Loaded ${formatShortDateTime(new Date())}`;
+      showNotice(false);
+    } catch (error) {
+      setStatus("Load failed", "error");
+      if (options.manual || options.showErrors) {
+        showAdminMessage(firebaseErrorMessage(error), false);
+      }
+      state.systemStatus = Object.assign(normalizeSystemStatus(null), {
+        status: "error",
+        detail: firebaseErrorMessage(error),
+        lastError: firebaseErrorMessage(error)
+      });
+      renderSystemStatus();
+      renderCalendar();
+      renderEvents();
+      showNotice(true);
+    }
+  }
+
+  function eventsFromSnapshot(snapshot) {
+    return snapshot.docs.map((documentSnapshot) => {
+      return Object.assign({ id: documentSnapshot.id }, documentSnapshot.data());
+    });
+  }
+
+  function normalizePublicContactForStore(contact) {
+    const displayName = String(contact.displayName || contact.name || "Contact").trim();
+    return {
+      id: String(contact.id || ""),
+      displayName,
+      initials: String(contact.initials || initialsForName(displayName)).slice(0, 3).toUpperCase(),
+      avatarUrl: String(contact.avatarUrl || "").trim(),
+      tags: contact.tags || contact.tagsArray || "",
+      active: toBoolean(contact.active, true)
+    };
+  }
+
+  function attachPublicContacts(event, contacts) {
+    const eventTags = parseTags(event.recipientTags || event.recipientTagsArray);
+    const recipients = contacts
+      .filter((contact) => contact.active)
+      .filter((contact) => {
+        if (eventTags.length === 0) return true;
+        const contactTags = parseTags(contact.tags || contact.tagsArray);
+        return eventTags.some((tag) => contactTags.includes(tag));
+      })
+      .map(normalizeRecipientContact);
+
+    return Object.assign({}, event, { recipients });
+  }
+
+  function firebaseErrorMessage(error) {
+    const code = String(error && error.code ? error.code : "");
+    if (code === "permission-denied") {
+      return "Firebase permission denied. Check Firestore rules and login status.";
+    }
+    if (code === "unavailable") {
+      return "Firebase is temporarily unavailable. Try Refresh again.";
+    }
+    return String(error && error.message ? error.message : error);
   }
 
   function jsonp(action, params = {}) {
@@ -204,7 +362,7 @@
       const timer = window.setTimeout(() => {
         cleanup();
         reject(new Error("Apps Script did not respond in time."));
-      }, 20000);
+      }, Number(config.requestTimeoutMs) || 60000);
 
       window[callbackName] = (payload) => {
         cleanup();
@@ -227,6 +385,14 @@
     });
   }
 
+  function appsScriptTimeoutMessage(error) {
+    const message = String(error && error.message ? error.message : error);
+    if (message === "Apps Script did not respond in time.") {
+      return "Apps Script public data refresh timed out. Login may still be OK; wait a moment and press Refresh.";
+    }
+    return message;
+  }
+
   function normalizeEvent(event) {
     const recurrence = event.recurrence === "yearly" ? "yearly" : "none";
     const normalized = {
@@ -240,6 +406,9 @@
       yearlyDay: Number(event.yearlyDay || 0),
       leadMinutes: clampInteger(event.leadMinutes, 0, 525600, 20160),
       reminderFrequencyDays: clampInteger(event.reminderFrequencyDays, 0, 365, 1),
+      recipientTags: Array.isArray(event.recipientTags || event.recipientTagsArray)
+        ? (event.recipientTags || event.recipientTagsArray).join(", ")
+        : String(event.recipientTags || ""),
       recipients: Array.isArray(event.recipients) ? event.recipients.map(normalizeRecipientContact) : [],
       soundEnabled: toBoolean(event.soundEnabled, true),
       flashEnabled: toBoolean(event.flashEnabled, true),
@@ -271,7 +440,7 @@
     const safe = status || {};
     return {
       status: String(safe.status || "setup"),
-      checkedAt: String(safe.checkedAt || ""),
+      checkedAt: timestampToIso(safe.checkedAt),
       triggerInstalled: toBoolean(safe.triggerInstalled, false),
       triggerStale: toBoolean(safe.triggerStale, true),
       senderExpected: String(safe.senderExpected || ""),
@@ -320,8 +489,9 @@
   }
 
   function systemStatusDetail(status, level) {
-    if (!config.appsScriptUrl) return "Set appsScriptUrl in config.js to enable backend status.";
+    if (!hasDataBackend()) return "Connect Firebase in config.js to enable reminders.";
     if (status.detail) return status.detail;
+    if (firebaseMode && level === "setup") return "Firebase is connected. Apps Script Gmail worker has not checked in yet.";
     if (!status.triggerInstalled) return "Install the Apps Script time trigger to activate automatic email checks.";
     if (status.triggerStale) return "The trigger has not checked in recently. Open Apps Script and inspect triggers.";
     if (status.lastError) return status.lastError;
@@ -406,7 +576,7 @@
       const name = document.createElement("h3");
       name.textContent = event.title;
       const meta = document.createElement("p");
-      meta.textContent = `${formatFullDateTime(event.nextOccurrence)} · ${formatReminderSchedule(event.leadMinutes, event.reminderFrequencyDays)}`;
+      meta.textContent = `${formatFullDateTime(event.nextOccurrence)} - ${formatReminderSchedule(event.leadMinutes, event.reminderFrequencyDays)}`;
       copy.appendChild(name);
       copy.appendChild(meta);
 
@@ -509,8 +679,8 @@
     const publicEvents = state.events.filter((event) => event.active);
     dom.eventList.innerHTML = "";
     dom.eventCount.textContent = `${publicEvents.length} ${publicEvents.length === 1 ? "event" : "events"}`;
-    dom.emptyState.classList.toggle("is-hidden", publicEvents.length > 0 || !config.appsScriptUrl);
-    showNotice(!config.appsScriptUrl);
+    dom.emptyState.classList.toggle("is-hidden", publicEvents.length > 0 || !hasDataBackend());
+    showNotice(!hasDataBackend());
 
     for (const event of publicEvents) {
       const card = dom.eventTemplate.content.firstElementChild.cloneNode(true);
@@ -704,7 +874,7 @@
     return makeDateInConfiguredZone(`${year}-${pad(month)}-${pad(safeDay)}`, timeString);
   }
 
-  function submitEventForm(event) {
+  async function submitEventForm(event) {
     event.preventDefault();
     const form = dom.eventForm;
     const leadMinutes =
@@ -734,13 +904,18 @@
       }
     };
 
+    if (firebaseMode) {
+      await saveFirebaseEvent(payload.event);
+      return;
+    }
+
     submitToAppsScript(payload);
   }
 
-  function submitRecipientForm(event) {
+  async function submitRecipientForm(event) {
     event.preventDefault();
     const form = dom.recipientForm;
-    submitToAppsScript({
+    const payload = {
       action: "saveRecipient",
       recipient: {
         displayName: form.displayName.value.trim(),
@@ -749,21 +924,40 @@
         tags: form.tags.value.trim(),
         active: true
       }
-    });
+    };
+
+    if (firebaseMode) {
+      await saveFirebaseRecipient(payload.recipient);
+      return;
+    }
+
+    submitToAppsScript(payload);
   }
 
-  function submitDisableRecipient() {
+  async function submitDisableRecipient() {
     const form = dom.recipientForm;
     if (!form.reportValidity()) return;
 
-    submitToAppsScript({
+    const payload = {
       action: "deleteRecipient",
       email: form.email.value.trim()
-    });
+    };
+
+    if (firebaseMode) {
+      await disableFirebaseRecipient(payload.email);
+      return;
+    }
+
+    submitToAppsScript(payload);
   }
 
-  function submitLoginForm(event) {
+  async function submitLoginForm(event) {
     event.preventDefault();
+    if (firebaseMode) {
+      await loginWithFirebase();
+      return;
+    }
+
     if (!config.appsScriptUrl) {
       showAdminMessage("Set appsScriptUrl in config.js before logging in.", false);
       return;
@@ -784,26 +978,288 @@
     );
   }
 
-  function submitCompleteCycleForm(event) {
+  async function submitCompleteCycleForm(event) {
     event.preventDefault();
     const form = dom.completeCycleForm;
-    submitToAppsScript({
+    const payload = {
       action: "completeCycle",
       id: form.id.value.trim(),
       note: form.note.value.trim()
+    };
+
+    if (firebaseMode) {
+      await completeFirebaseCycle(payload.id, payload.note);
+      return;
+    }
+
+    submitToAppsScript(payload);
+  }
+
+  async function submitArchiveForm(event) {
+    event.preventDefault();
+    const form = dom.archiveEventForm;
+    const payload = {
+      action: "deleteEvent",
+      id: form.id.value.trim()
+    };
+
+    if (firebaseMode) {
+      await archiveFirebaseEvent(payload.id);
+      return;
+    }
+
+    submitToAppsScript(payload);
+  }
+
+  async function loginWithFirebase() {
+    if (!firebaseAuth) {
+      showAdminMessage("Firebase Auth is not initialized. Check config.js.", false);
+      return;
+    }
+
+    const email = String(dom.loginForm.email.value || "").trim().toLowerCase();
+    const password = dom.loginForm.password.value;
+    if (!email || !password) {
+      showAdminMessage("Enter admin email and password.", false);
+      return;
+    }
+
+    if (adminEmails.length > 0 && !adminEmails.includes(email)) {
+      showAdminMessage("This email is not listed as an admin in config.js.", false);
+      return;
+    }
+
+    if (state.pendingSubmit) return;
+    state.pendingSubmit = true;
+    setAdminFormsDisabled(true);
+    showAdminMessage("Logging in with Firebase...", true);
+
+    try {
+      const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
+      state.firebaseUser = credential.user;
+      updateAuthUi();
+      dom.loginForm.reset();
+      showAdminMessage("Logged in. Admin actions are unlocked on this browser.", true);
+      await loadEvents({ silent: true });
+    } catch (error) {
+      showAdminMessage(firebaseErrorMessage(error), false);
+    } finally {
+      state.pendingSubmit = false;
+      setAdminFormsDisabled(false);
+    }
+  }
+
+  async function saveFirebaseEvent(input) {
+    await runFirebaseAdminAction("Saving event...", async () => {
+      const id = makeDocumentId(input.id, "evt");
+      const title = String(input.title || "").trim();
+      const eventDate = requireDateString(input.eventDate);
+      const eventTime = requireTimeString(input.eventTime);
+      const recurrence = input.recurrence === "yearly" ? "yearly" : "none";
+      const dateParts = eventDate.split("-").map(Number);
+
+      if (!title) throw new Error("Event title is required.");
+
+      const eventRef = doc(firestore, "events", id);
+      const existing = await getDoc(eventRef);
+      const record = {
+        id,
+        title: title.slice(0, 120),
+        details: String(input.details || "").trim().slice(0, 6000),
+        eventDate,
+        eventTime,
+        recurrence,
+        yearlyMonth: recurrence === "yearly" ? dateParts[1] : 0,
+        yearlyDay: recurrence === "yearly" ? dateParts[2] : 0,
+        leadMinutes: clampInteger(input.leadMinutes, 0, 525600, 20160),
+        reminderFrequencyDays: clampInteger(input.reminderFrequencyDays, 0, 365, 1),
+        recipientTags: String(input.recipientTags || "").trim().slice(0, 200),
+        recipientTagsArray: parseTags(input.recipientTags),
+        soundEnabled: toBoolean(input.soundEnabled, true),
+        flashEnabled: toBoolean(input.flashEnabled, true),
+        active: input.active === undefined ? true : toBoolean(input.active, true),
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+
+      if (!existing.exists()) {
+        record.createdAt = serverTimestamp();
+        record.completedOccurrenceKeys = [];
+      }
+
+      await setDoc(eventRef, record, { merge: true });
+      return "Event saved.";
     });
   }
 
-  function submitArchiveForm(event) {
-    event.preventDefault();
-    const form = dom.archiveEventForm;
-    submitToAppsScript({
-      action: "deleteEvent",
-      id: form.id.value.trim()
+  async function saveFirebaseRecipient(input) {
+    await runFirebaseAdminAction("Saving contact...", async () => {
+      const email = String(input.email || "").trim().toLowerCase();
+      if (!isValidEmail(email)) throw new Error("A valid Gmail address is required.");
+
+      const id = contactDocumentId(email);
+      const displayName = String(input.displayName || email.split("@")[0]).trim().slice(0, 80);
+      const avatarUrl = sanitizePublicUrl(input.avatarUrl || "");
+      const tags = String(input.tags || "").trim().slice(0, 200);
+      const tagsArray = parseTags(tags);
+      const initials = initialsForName(displayName).slice(0, 3).toUpperCase();
+      const contactRef = doc(firestore, "contacts", id);
+      const publicRef = doc(firestore, "publicContacts", id);
+      const existing = await getDoc(contactRef);
+      const batch = writeBatch(firestore);
+      const base = {
+        id,
+        displayName,
+        avatarUrl,
+        tags,
+        tagsArray,
+        active: input.active === undefined ? true : toBoolean(input.active, true),
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+
+      batch.set(
+        contactRef,
+        Object.assign({}, base, {
+          email,
+          createdAt: existing.exists() ? existing.data().createdAt || serverTimestamp() : serverTimestamp()
+        }),
+        { merge: true }
+      );
+      batch.set(
+        publicRef,
+        Object.assign({}, base, {
+          initials,
+          createdAt: existing.exists() ? existing.data().createdAt || serverTimestamp() : serverTimestamp()
+        }),
+        { merge: true }
+      );
+      await batch.commit();
+      dom.recipientForm.reset();
+      return "Gmail contact saved.";
     });
+  }
+
+  async function disableFirebaseRecipient(emailInput) {
+    await runFirebaseAdminAction("Disabling contact...", async () => {
+      const email = String(emailInput || "").trim().toLowerCase();
+      if (!isValidEmail(email)) throw new Error("A valid Gmail address is required.");
+
+      const id = contactDocumentId(email);
+      const batch = writeBatch(firestore);
+      const updates = {
+        active: false,
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+
+      batch.set(doc(firestore, "contacts", id), Object.assign({ id, email }, updates), { merge: true });
+      batch.set(doc(firestore, "publicContacts", id), Object.assign({ id }, updates), { merge: true });
+      await batch.commit();
+      dom.recipientForm.reset();
+      return "Gmail contact disabled.";
+    });
+  }
+
+  async function completeFirebaseCycle(id, note) {
+    await runFirebaseAdminAction("Marking done...", async () => {
+      const eventId = String(id || "").trim();
+      if (!eventId) throw new Error("Event ID is required.");
+
+      const reminder = state.events.find((item) => item.id === eventId);
+      if (!reminder) throw new Error("Active event not found.");
+
+      const occurrence = computeNextOccurrence(reminder, new Date());
+      if (!occurrence) throw new Error("No upcoming cycle to complete.");
+
+      const key = occurrenceKey(occurrence);
+      const completionId = makeDocumentId(`${eventId}_${key}`, "done");
+      const eventRef = doc(firestore, "events", eventId);
+      const completionRef = doc(firestore, "completionLog", completionId);
+      const completedOccurrenceKeys = Array.from(new Set([...(reminder.completedOccurrenceKeys || []), key]));
+      const eventUpdates = {
+        completedOccurrenceKeys,
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+
+      if (reminder.recurrence !== "yearly") {
+        eventUpdates.active = false;
+      }
+
+      const batch = writeBatch(firestore);
+      batch.set(
+        completionRef,
+        {
+          completionId,
+          eventId,
+          occurrenceKey: key,
+          completedAt: serverTimestamp(),
+          completedBy: currentAdminEmail(),
+          note: String(note || "").trim().slice(0, 1000)
+        },
+        { merge: true }
+      );
+      batch.update(eventRef, eventUpdates);
+      await batch.commit();
+      dom.completeCycleForm.reset();
+      return reminder.recurrence === "yearly"
+        ? "This cycle is marked done. Next yearly reminder will be shown."
+        : "This one-time event is marked done and hidden.";
+    });
+  }
+
+  async function archiveFirebaseEvent(id) {
+    await runFirebaseAdminAction("Archiving event...", async () => {
+      const eventId = String(id || "").trim();
+      if (!eventId) throw new Error("Event ID is required.");
+
+      await updateDoc(doc(firestore, "events", eventId), {
+        active: false,
+        archivedAt: serverTimestamp(),
+        archivedBy: currentAdminEmail(),
+        updatedAt: serverTimestamp()
+      });
+      dom.archiveEventForm.reset();
+      return "Event archived.";
+    });
+  }
+
+  async function runFirebaseAdminAction(message, action) {
+    if (!firestore) {
+      showAdminMessage("Firebase is not initialized. Check config.js.", false);
+      return;
+    }
+
+    if (!isAdminLoggedIn()) {
+      openAdminDialog();
+      showAdminMessage("Login first, then try again.", false);
+      return;
+    }
+
+    if (state.pendingSubmit) return;
+    state.pendingSubmit = true;
+    setAdminFormsDisabled(true);
+    showAdminMessage(message, true);
+
+    try {
+      const successMessage = await action();
+      showAdminMessage(successMessage || "Saved.", true);
+      await loadEvents({ silent: true });
+    } catch (error) {
+      showAdminMessage(firebaseErrorMessage(error), false);
+    } finally {
+      state.pendingSubmit = false;
+      setAdminFormsDisabled(false);
+    }
   }
 
   function submitToAppsScript(payload, options = {}) {
+    if (firebaseMode) {
+      showAdminMessage("Firebase stores events now. Apps Script only sends scheduled Gmail reminders.", false);
+      return;
+    }
+
     if (!config.appsScriptUrl) {
       showAdminMessage("Set appsScriptUrl in config.js before saving.", false);
       return;
@@ -826,12 +1282,20 @@
     dom.bridgeForm.action = config.appsScriptUrl;
     dom.bridgePayload.value = JSON.stringify(payload);
     dom.bridgeForm.submit();
+    window.clearTimeout(state.pendingSubmitTimer);
+    state.pendingSubmitTimer = window.setTimeout(() => {
+      state.pendingSubmit = false;
+      setAdminFormsDisabled(false);
+      showAdminMessage("Apps Script admin action did not respond in time. Check deployment URL/permissions, then try again.", false);
+    }, Number(config.requestTimeoutMs) || 60000);
   }
 
   function handleBridgeMessage(event) {
     const data = event.data;
     if (!data || data.source !== "alarm-reminder-apps-script") return;
 
+    window.clearTimeout(state.pendingSubmitTimer);
+    state.pendingSubmitTimer = null;
     state.pendingSubmit = false;
     setAdminFormsDisabled(false);
     showAdminMessage(data.message || data.error || "Apps Script replied.", data.ok === true);
@@ -851,7 +1315,7 @@
       if (data.action === "completeCycle") {
         dom.completeCycleForm.reset();
       }
-      loadEvents();
+      loadEvents({ silent: data.action === "login" });
       renderCalendar();
     } else if (/token|session|login/i.test(String(data.error || data.message || ""))) {
       clearAdminSession();
@@ -914,6 +1378,7 @@
     dom.eventForm.recurrence.value = event.recurrence;
     dom.eventForm.soundEnabled.checked = event.soundEnabled;
     dom.eventForm.flashEnabled.checked = event.flashEnabled;
+    dom.eventForm.recipientTags.value = event.recipientTags || "";
 
     const presetValues = ["10", "60", "1440", "10080", "20160", "43200", "86400", "129600"];
     if (presetValues.includes(String(event.leadMinutes))) {
@@ -948,11 +1413,16 @@
     showAdminMessage(`Ready to archive "${event.title}". Press Archive to confirm.`, true);
   }
 
-  function completeEventFromCard(event) {
+  async function completeEventFromCard(event) {
     if (!isAdminLoggedIn()) {
       openAdminDialog();
       dom.completeCycleForm.id.value = event.id;
       showAdminMessage("Login first to mark this event done.", false);
+      return;
+    }
+
+    if (firebaseMode) {
+      await completeFirebaseCycle(event.id, "");
       return;
     }
 
@@ -963,7 +1433,7 @@
     });
   }
 
-  function archiveEventFromCard(event) {
+  async function archiveEventFromCard(event) {
     if (!isAdminLoggedIn()) {
       openAdminDialog();
       dom.archiveEventForm.id.value = event.id;
@@ -973,6 +1443,11 @@
 
     const ok = window.confirm(`Archive "${event.title}"? It will stop showing and stop reminders.`);
     if (!ok) return;
+
+    if (firebaseMode) {
+      await archiveFirebaseEvent(event.id);
+      return;
+    }
 
     submitToAppsScript({
       action: "deleteEvent",
@@ -990,6 +1465,13 @@
   }
 
   function loadAdminSession() {
+    if (firebaseMode) {
+      state.adminToken = "";
+      state.adminExpiresAt = 0;
+      localStorage.removeItem(ADMIN_SESSION_KEY);
+      return;
+    }
+
     try {
       const raw = localStorage.getItem(ADMIN_SESSION_KEY);
       if (!raw) return;
@@ -1023,22 +1505,42 @@
     updateAuthUi();
   }
 
-  function logoutAdmin() {
+  async function logoutAdmin() {
+    if (firebaseMode) {
+      if (firebaseAuth) await signOut(firebaseAuth);
+      state.firebaseUser = null;
+      updateAuthUi();
+      showAdminMessage("Logged out. You are browsing as guest.", true);
+      return;
+    }
+
     clearAdminSession();
     showAdminMessage("Logged out. You are browsing as guest.", true);
   }
 
   function isAdminLoggedIn() {
+    if (firebaseMode) {
+      return Boolean(
+        state.firebaseUser &&
+          state.firebaseUser.email &&
+          (adminEmails.length === 0 || adminEmails.includes(String(state.firebaseUser.email).toLowerCase()))
+      );
+    }
+
     return Boolean(state.adminToken) && Number(state.adminExpiresAt) > Date.now();
   }
 
   function updateAuthUi() {
     const isAdmin = isAdminLoggedIn();
-    dom.authStatus.textContent = isAdmin ? "Admin" : "Guest";
+    const signedInEmail = state.firebaseUser && state.firebaseUser.email ? String(state.firebaseUser.email) : "";
+    dom.authStatus.textContent = isAdmin ? "Admin" : signedInEmail ? "Guest" : "Guest";
     dom.authStatus.classList.toggle("status-ok", isAdmin);
     dom.authStatus.classList.toggle("status-muted", !isAdmin);
     dom.loginForm.classList.toggle("is-admin", isAdmin);
     dom.adminButton.querySelector("span").textContent = isAdmin ? "Admin" : "Login";
+    if (firebaseMode && dom.loginForm.email && !dom.loginForm.email.value) {
+      dom.loginForm.email.value = adminEmails[0] || "";
+    }
 
     dom.adminDialog.querySelectorAll(".admin-grid button, .admin-grid input, .admin-grid select, .admin-grid textarea").forEach((element) => {
       element.disabled = !isAdmin || state.pendingSubmit;
@@ -1133,6 +1635,11 @@
 
   function showNotice(show) {
     dom.setupNotice.classList.toggle("is-hidden", !show);
+  }
+
+  function hasDataBackend() {
+    if (firebaseMode) return Boolean(firestore);
+    return Boolean(config.appsScriptUrl);
   }
 
   function sortByNextOccurrence(a, b) {
@@ -1242,6 +1749,80 @@
     if (value === true || value === "true" || value === "TRUE" || value === 1 || value === "1") return true;
     if (value === false || value === "false" || value === "FALSE" || value === 0 || value === "0") return false;
     return fallback;
+  }
+
+  function currentAdminEmail() {
+    return state.firebaseUser && state.firebaseUser.email ? String(state.firebaseUser.email).toLowerCase() : "";
+  }
+
+  function makeDocumentId(value, prefix) {
+    const raw = String(value || "").trim();
+    const fallback = `${prefix}_${randomId()}`;
+    const base = raw || fallback;
+    const cleaned = base
+      .replace(/[^A-Za-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 120);
+    if (!cleaned || cleaned === "." || cleaned === ".." || /^__.*__$/.test(cleaned)) return fallback;
+    return cleaned;
+  }
+
+  function contactDocumentId(email) {
+    return makeDocumentId(`rec_${String(email || "").toLowerCase()}`, "rec");
+  }
+
+  function randomId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID().replace(/-/g, "");
+    }
+    return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  }
+
+  function requireDateString(value) {
+    const text = String(value || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new Error("Date must be YYYY-MM-DD.");
+    const [year, month, day] = text.split("-").map(Number);
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+      throw new Error("Invalid date.");
+    }
+    return text;
+  }
+
+  function requireTimeString(value) {
+    const text = String(value || "").trim();
+    if (!/^\d{2}:\d{2}$/.test(text)) throw new Error("Time must be HH:mm.");
+    const [hour, minute] = text.split(":").map(Number);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      throw new Error("Invalid time.");
+    }
+    return text;
+  }
+
+  function parseTags(value) {
+    const raw = Array.isArray(value) ? value.join(",") : String(value || "");
+    return raw
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function timestampToIso(value) {
+    if (!value) return "";
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value.toDate === "function") return value.toDate().toISOString();
+    if (typeof value.seconds === "number") return new Date(value.seconds * 1000).toISOString();
+    return String(value);
+  }
+
+  function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+  }
+
+  function sanitizePublicUrl(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/^https?:\/\/[^\s]+$/i.test(text)) return text.slice(0, 1000);
+    return "";
   }
 
   function pad(value) {
