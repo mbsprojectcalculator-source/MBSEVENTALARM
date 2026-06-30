@@ -18,6 +18,12 @@ import {
   where,
   writeBatch
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+import {
+  getDownloadURL,
+  getStorage,
+  ref as storageRef,
+  uploadBytes
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-storage.js";
 
 (() => {
   "use strict";
@@ -32,7 +38,8 @@ import {
       timeZoneOffset: "+08:00",
       requestTimeoutMs: 60000,
       refreshMs: 60000,
-      alarmWindowMinutes: 60
+      alarmWindowMinutes: 60,
+      avatarMaxBytes: 2 * 1024 * 1024
     },
     window.ALARM_REMINDER_CONFIG || {}
   );
@@ -43,11 +50,13 @@ import {
   let firebaseApp = null;
   let firebaseAuth = null;
   let firestore = null;
+  let firebaseStorage = null;
 
   if (firebaseMode && config.firebase && config.firebase.projectId) {
     firebaseApp = initializeApp(config.firebase);
     firebaseAuth = getAuth(firebaseApp);
     firestore = getFirestore(firebaseApp);
+    firebaseStorage = getStorage(firebaseApp);
   }
 
   const state = {
@@ -128,6 +137,7 @@ import {
     dom.logoutButton = document.getElementById("logoutButton");
     dom.eventForm = document.getElementById("eventForm");
     dom.recipientForm = document.getElementById("recipientForm");
+    dom.avatarFile = document.getElementById("avatarFile");
     dom.groupForm = document.getElementById("groupForm");
     dom.completeCycleForm = document.getElementById("completeCycleForm");
     dom.archiveEventForm = document.getElementById("archiveEventForm");
@@ -1171,6 +1181,7 @@ import {
         displayName: form.displayName.value.trim(),
         email: form.email.value.trim(),
         avatarUrl: form.avatarUrl.value.trim(),
+        avatarFile: form.avatarFile.files && form.avatarFile.files[0] ? form.avatarFile.files[0] : null,
         tags: form.tags.value.trim(),
         active: true
       }
@@ -1426,7 +1437,8 @@ import {
 
       const id = contactDocumentId(email);
       const displayName = String(input.displayName || email.split("@")[0]).trim().slice(0, 80);
-      const avatarUrl = sanitizePublicUrl(input.avatarUrl || "");
+      const uploadedAvatarUrl = await uploadContactAvatarIfNeeded(id, input.avatarFile);
+      const avatarUrl = uploadedAvatarUrl || sanitizePublicUrl(input.avatarUrl || "");
       const tags = String(input.tags || "").trim().slice(0, 200);
       const tagsArray = parseTags(tags);
       const initials = initialsForName(displayName).slice(0, 3).toUpperCase();
@@ -1465,6 +1477,29 @@ import {
       dom.recipientForm.reset();
       return "Gmail contact saved.";
     });
+  }
+
+  async function uploadContactAvatarIfNeeded(contactId, file) {
+    if (!file) return "";
+    if (!firebaseStorage) throw new Error("Firebase Storage is not initialized. Check storageBucket in config.js.");
+
+    const maxBytes = Number(config.avatarMaxBytes) || 2 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new Error(`Avatar image is too large. Max size is ${Math.round(maxBytes / 1024 / 1024)} MB.`);
+    }
+
+    const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    if (!allowedTypes.has(file.type)) {
+      throw new Error("Avatar image must be PNG, JPG, WEBP, or GIF.");
+    }
+
+    const extension = avatarExtensionForMime(file.type);
+    const ref = storageRef(firebaseStorage, `contact-avatars/${contactId}/avatar.${extension}`);
+    await uploadBytes(ref, file, {
+      contentType: file.type,
+      cacheControl: "public,max-age=3600"
+    });
+    return getDownloadURL(ref);
   }
 
   async function disableFirebaseRecipient(emailInput) {
@@ -2335,6 +2370,13 @@ import {
     if (!text) return "";
     if (/^https?:\/\/[^\s]+$/i.test(text)) return text.slice(0, 1000);
     return "";
+  }
+
+  function avatarExtensionForMime(mimeType) {
+    if (mimeType === "image/jpeg") return "jpg";
+    if (mimeType === "image/webp") return "webp";
+    if (mimeType === "image/gif") return "gif";
+    return "png";
   }
 
   function pad(value) {
