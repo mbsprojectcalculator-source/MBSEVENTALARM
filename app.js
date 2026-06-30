@@ -190,6 +190,7 @@ import {
   function bindEvents() {
     dom.refreshButton.addEventListener("click", () => loadEvents({ manual: true }));
     dom.toolbarToggleButton.addEventListener("click", toggleSideToolbar);
+    dom.adminDialog.addEventListener("click", closeDialogOnBackdropClick);
     dom.adminButton.addEventListener("click", openAdminDialog);
     dom.addEventButton.addEventListener("click", startNewEvent);
     dom.addContactButton.addEventListener("click", startNewContact);
@@ -1790,6 +1791,25 @@ import {
       element.disabled = disabled;
     });
     if (!disabled) updateAuthUi();
+  }
+
+  function closeDialogOnBackdropClick(event) {
+    if (event.target !== dom.adminDialog) return;
+
+    const rect = dom.adminDialog.getBoundingClientRect();
+    const clickedInside =
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top &&
+      event.clientY <= rect.bottom;
+
+    if (clickedInside) return;
+
+    if (typeof dom.adminDialog.close === "function") {
+      dom.adminDialog.close();
+    } else {
+      dom.adminDialog.removeAttribute("open");
+    }
   }
 
   function openAdminDialog(view = "") {
