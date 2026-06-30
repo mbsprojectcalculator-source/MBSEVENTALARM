@@ -6,6 +6,7 @@ import {
   signOut
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
 import {
+  arrayRemove,
   collection,
   doc,
   getDoc,
@@ -18,12 +19,6 @@ import {
   where,
   writeBatch
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
-import {
-  getDownloadURL,
-  getStorage,
-  ref as storageRef,
-  uploadBytes
-} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-storage.js";
 
 (() => {
   "use strict";
@@ -39,7 +34,14 @@ import {
       requestTimeoutMs: 60000,
       refreshMs: 60000,
       alarmWindowMinutes: 60,
-      avatarMaxBytes: 2 * 1024 * 1024
+      githubImages: {
+        owner: "",
+        repo: "",
+        branch: "main",
+        directory: "images",
+        apiUrl: ""
+      },
+      avatarChoices: []
     },
     window.ALARM_REMINDER_CONFIG || {}
   );
@@ -50,19 +52,19 @@ import {
   let firebaseApp = null;
   let firebaseAuth = null;
   let firestore = null;
-  let firebaseStorage = null;
 
   if (firebaseMode && config.firebase && config.firebase.projectId) {
     firebaseApp = initializeApp(config.firebase);
     firebaseAuth = getAuth(firebaseApp);
     firestore = getFirestore(firebaseApp);
-    firebaseStorage = getStorage(firebaseApp);
   }
 
   const state = {
     events: [],
     publicContacts: [],
+    privateContacts: [],
     publicGroups: [],
+    avatarChoices: [],
     systemStatus: null,
     calendarMonth: startOfMonth(new Date()),
     selectedCalendarDate: "",
@@ -90,6 +92,7 @@ import {
     loadAdminSession();
     bindEvents();
     initFirebaseAuth();
+    loadAvatarChoices();
     setDefaultEventDateTime();
     updateAuthUi();
     renderSystemStatus();
@@ -137,13 +140,23 @@ import {
     dom.logoutButton = document.getElementById("logoutButton");
     dom.eventForm = document.getElementById("eventForm");
     dom.recipientForm = document.getElementById("recipientForm");
-    dom.avatarFile = document.getElementById("avatarFile");
+    dom.avatarPickerToggle = document.getElementById("avatarPickerToggle");
+    dom.avatarPickerPanel = document.getElementById("avatarPickerPanel");
+    dom.avatarPreview = document.getElementById("avatarPreview");
+    dom.avatarPickerLabel = document.getElementById("avatarPickerLabel");
+    dom.avatarPickerPath = document.getElementById("avatarPickerPath");
+    dom.clearAvatarButton = document.getElementById("clearAvatarButton");
+    dom.avatarGallery = document.getElementById("avatarGallery");
+    dom.avatarGalleryEmpty = document.getElementById("avatarGalleryEmpty");
+    dom.contactManagerList = document.getElementById("contactManagerList");
+    dom.contactManagerCount = document.getElementById("contactManagerCount");
     dom.groupForm = document.getElementById("groupForm");
     dom.completeCycleForm = document.getElementById("completeCycleForm");
     dom.archiveEventForm = document.getElementById("archiveEventForm");
     dom.clearEventFormButton = document.getElementById("clearEventFormButton");
     dom.deleteEventButton = document.getElementById("deleteEventButton");
     dom.disableRecipientButton = document.getElementById("disableRecipientButton");
+    dom.deleteContactButton = document.getElementById("deleteContactButton");
     dom.disableGroupButton = document.getElementById("disableGroupButton");
     dom.bridgeForm = document.getElementById("bridgeForm");
     dom.bridgePayload = document.getElementById("bridgePayload");
@@ -210,7 +223,10 @@ import {
     dom.clearEventFormButton.addEventListener("click", clearEventForm);
     dom.deleteEventButton.addEventListener("click", submitDeleteEvent);
     dom.disableRecipientButton.addEventListener("click", submitDisableRecipient);
+    dom.deleteContactButton.addEventListener("click", submitDeleteContact);
     dom.disableGroupButton.addEventListener("click", submitDisableGroup);
+    dom.avatarPickerToggle.addEventListener("click", () => toggleAvatarPicker());
+    dom.clearAvatarButton.addEventListener("click", clearSelectedAvatar);
     dom.eventForm.leadPreset.addEventListener("change", toggleCustomLead);
     dom.eventForm.frequencyPreset.addEventListener("change", toggleCustomFrequency);
     window.addEventListener("message", handleBridgeMessage);
@@ -297,16 +313,19 @@ import {
     setStatus(options.manual ? "Refreshing" : "Loading", "muted");
 
     try {
-      const [eventsSnapshot, contactsSnapshot, groupsSnapshot, systemSnapshot] = await Promise.all([
+      const admin = isAdminLoggedIn();
+      const [eventsSnapshot, contactsSnapshot, groupsSnapshot, systemSnapshot, privateContactsSnapshot] = await Promise.all([
         getDocs(query(collection(firestore, "events"), where("active", "==", true))),
         getDocs(query(collection(firestore, "publicContacts"), where("active", "==", true))),
         getDocs(query(collection(firestore, "publicGroups"), where("active", "==", true))),
-        getDoc(doc(firestore, "system", "status"))
+        getDoc(doc(firestore, "system", "status")),
+        admin ? getDocs(collection(firestore, "contacts")) : Promise.resolve(null)
       ]);
 
       const publicContacts = eventsFromSnapshot(contactsSnapshot).map(normalizePublicContactForStore);
       const publicGroups = eventsFromSnapshot(groupsSnapshot).map(normalizePublicGroupForStore);
       state.publicContacts = publicContacts;
+      state.privateContacts = privateContactsSnapshot ? eventsFromSnapshot(privateContactsSnapshot).map(normalizePrivateContactForStore) : [];
       state.publicGroups = publicGroups;
       state.systemStatus = normalizeSystemStatus(systemSnapshot.exists() ? systemSnapshot.data() : null);
       state.events = eventsFromSnapshot(eventsSnapshot)
@@ -321,6 +340,7 @@ import {
       renderContactPicker();
       renderGroupPicker();
       renderGroupContactPicker();
+      renderContactManager();
       checkAlarms();
       setStatus("Firebase", "ok");
       dom.lastUpdated.textContent = `Loaded ${formatShortDateTime(new Date())}`;
@@ -354,7 +374,20 @@ import {
       id: String(contact.id || ""),
       displayName,
       initials: String(contact.initials || initialsForName(displayName)).slice(0, 3).toUpperCase(),
-      avatarUrl: String(contact.avatarUrl || "").trim(),
+      avatarUrl: sanitizeAvatarPath(contact.avatarUrl || ""),
+      tags: contact.tags || contact.tagsArray || "",
+      active: toBoolean(contact.active, true)
+    };
+  }
+
+  function normalizePrivateContactForStore(contact) {
+    const displayName = String(contact.displayName || contact.email || "Contact").trim();
+    return {
+      id: String(contact.id || ""),
+      email: String(contact.email || "").trim().toLowerCase(),
+      displayName,
+      initials: String(contact.initials || initialsForName(displayName)).slice(0, 3).toUpperCase(),
+      avatarUrl: sanitizeAvatarPath(contact.avatarUrl || ""),
       tags: contact.tags || contact.tagsArray || "",
       active: toBoolean(contact.active, true)
     };
@@ -500,7 +533,7 @@ import {
       id: String(recipient.id || ""),
       displayName,
       initials: String(recipient.initials || initialsForName(displayName)).slice(0, 3).toUpperCase(),
-      avatarUrl: String(recipient.avatarUrl || "").trim()
+      avatarUrl: sanitizeAvatarPath(recipient.avatarUrl || "")
     };
   }
 
@@ -1003,6 +1036,285 @@ import {
       .filter(Boolean);
   }
 
+  async function loadAvatarChoices() {
+    const configured = normalizeAvatarChoices(config.avatarChoices || []);
+    let githubChoices = [];
+    let directoryChoices = [];
+
+    try {
+      githubChoices = await loadGithubAvatarChoices();
+    } catch (_error) {
+      githubChoices = [];
+    }
+
+    try {
+      directoryChoices = await loadDirectoryAvatarChoices();
+    } catch (_error) {
+      directoryChoices = [];
+    }
+
+    state.avatarChoices = mergeAvatarChoices(githubChoices, directoryChoices, configured);
+    renderAvatarGallery();
+  }
+
+  function normalizeAvatarChoices(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        if (typeof item === "string") {
+          const src = sanitizeAvatarPath(item);
+          return { src, label: src.split("/").pop() || src };
+        }
+        const src = sanitizeAvatarPath(item && item.src ? item.src : "");
+        return {
+          src,
+          label: String(item && item.label ? item.label : src).trim()
+        };
+      })
+      .filter((item) => item.src);
+  }
+
+  async function loadGithubAvatarChoices() {
+    const source = githubAvatarSource();
+    if (!source) return [];
+
+    const response = await fetch(source.apiUrl, {
+      cache: "no-store",
+      headers: {
+        Accept: "application/vnd.github+json"
+      }
+    });
+    if (!response.ok) return [];
+
+    const files = await response.json();
+    if (!Array.isArray(files)) return [];
+
+    return files
+      .filter((file) => file && file.type === "file" && /\.(jpe?g|png|webp|gif)$/i.test(file.name || ""))
+      .map((file) => {
+        const src = sanitizeAvatarPath(file.path || `${source.directory}/${file.name}`);
+        return {
+          src,
+          label: labelFromImageName(file.name)
+        };
+      })
+      .filter((item) => item.src);
+  }
+
+  async function loadDirectoryAvatarChoices() {
+    const directory = avatarImageDirectory();
+    const response = await fetch(`${directory}/`, { cache: "no-store" });
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const documentFragment = new DOMParser().parseFromString(html, "text/html");
+    return Array.from(documentFragment.querySelectorAll("a[href]"))
+      .map((link) => {
+        const href = link.getAttribute("href") || "";
+        const url = new URL(href, response.url);
+        const fileName = decodeURIComponent(url.pathname.split("/").pop() || "");
+        if (!/\.(jpe?g|png|webp|gif)$/i.test(fileName)) return null;
+        const src = sanitizeAvatarPath(`${directory}/${fileName}`);
+        return {
+          src,
+          label: labelFromImageName(fileName)
+        };
+      })
+      .filter(Boolean)
+      .filter((item) => item.src);
+  }
+
+  function githubAvatarSource() {
+    const imageConfig = Object.assign(
+      {
+        owner: "",
+        repo: "",
+        branch: "main",
+        directory: "images",
+        apiUrl: ""
+      },
+      config.githubImages || {}
+    );
+
+    const directory = String(imageConfig.directory || "images").replace(/^\/+|\/+$/g, "") || "images";
+    const apiUrl = String(imageConfig.apiUrl || "").trim();
+    if (apiUrl) return { apiUrl, directory };
+
+    let owner = String(imageConfig.owner || "").trim();
+    let repo = String(imageConfig.repo || "").trim();
+    const branch = String(imageConfig.branch || "main").trim() || "main";
+
+    if ((!owner || !repo) && /\.github\.io$/i.test(window.location.hostname)) {
+      owner = owner || window.location.hostname.replace(/\.github\.io$/i, "");
+      const pathParts = window.location.pathname.split("/").filter(Boolean);
+      repo = repo || pathParts[0] || `${owner}.github.io`;
+    }
+
+    if (!owner || !repo) return null;
+
+    const encodedDirectory = directory.split("/").map(encodeURIComponent).join("/");
+    return {
+      directory,
+      apiUrl:
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` +
+        `/contents/${encodedDirectory}?ref=${encodeURIComponent(branch)}`
+    };
+  }
+
+  function avatarImageDirectory() {
+    const imageConfig = Object.assign({ directory: "images" }, config.githubImages || {});
+    return String(imageConfig.directory || "images").replace(/^\/+|\/+$/g, "") || "images";
+  }
+
+  function mergeAvatarChoices(...groups) {
+    const choices = [];
+    const seen = new Set();
+
+    groups.flat().forEach((item) => {
+      const src = sanitizeAvatarPath(item && item.src ? item.src : "");
+      if (!src || seen.has(src)) return;
+      seen.add(src);
+      choices.push({
+        src,
+        label: String(item.label || labelFromImageName(src)).trim()
+      });
+    });
+
+    return choices;
+  }
+
+  function labelFromImageName(name) {
+    return String(name || "")
+      .split("/")
+      .pop()
+      .replace(/\.(jpe?g|png|webp|gif)$/i, "")
+      .replace(/[_-]+/g, " ")
+      .trim() || "Avatar";
+  }
+
+  function renderAvatarGallery(selected = dom.recipientForm ? dom.recipientForm.avatarUrl.value : "") {
+    if (!dom.avatarGallery) return;
+    dom.avatarGallery.innerHTML = "";
+    dom.avatarGalleryEmpty.classList.toggle("is-hidden", state.avatarChoices.length > 0);
+    updateAvatarPreview(selected);
+
+    for (const avatar of state.avatarChoices) {
+      const button = document.createElement("button");
+      button.className = "avatar-choice";
+      button.classList.toggle("is-selected", avatar.src === selected);
+      button.type = "button";
+      button.title = avatar.label || avatar.src;
+
+      const image = document.createElement("img");
+      image.alt = "";
+      image.src = avatar.src;
+
+      const label = document.createElement("span");
+      label.textContent = avatar.label || avatar.src;
+
+      button.appendChild(image);
+      button.appendChild(label);
+      button.addEventListener("click", () => {
+        selectAvatar(avatar.src);
+      });
+      dom.avatarGallery.appendChild(button);
+    }
+  }
+
+  function toggleAvatarPicker(forceOpen) {
+    if (!dom.avatarPickerPanel || !dom.avatarPickerToggle) return;
+    const shouldOpen =
+      typeof forceOpen === "boolean" ? forceOpen : dom.avatarPickerPanel.classList.contains("is-hidden");
+    dom.avatarPickerPanel.classList.toggle("is-hidden", !shouldOpen);
+    dom.avatarPickerToggle.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  }
+
+  function selectAvatar(src) {
+    dom.recipientForm.avatarUrl.value = src;
+    renderAvatarGallery(src);
+    toggleAvatarPicker(false);
+  }
+
+  function clearSelectedAvatar() {
+    dom.recipientForm.avatarUrl.value = "";
+    renderAvatarGallery("");
+    toggleAvatarPicker(false);
+  }
+
+  function updateAvatarPreview(selected = "") {
+    if (!dom.avatarPreview || !dom.avatarPickerLabel || !dom.avatarPickerPath) return;
+    const avatar = state.avatarChoices.find((item) => item.src === selected);
+    dom.avatarPreview.innerHTML = "";
+    dom.avatarPreview.classList.toggle("avatar-fallback", !selected);
+
+    if (selected) {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.src = selected;
+      image.addEventListener("error", () => {
+        image.remove();
+        dom.avatarPreview.textContent = "?";
+        dom.avatarPreview.classList.add("avatar-fallback");
+      });
+      dom.avatarPreview.appendChild(image);
+    } else {
+      dom.avatarPreview.textContent = "?";
+    }
+
+    dom.avatarPickerLabel.textContent = selected ? avatar?.label || "Selected avatar" : "Choose avatar";
+    dom.avatarPickerPath.textContent = selected ? avatar?.src || selected : "Click to open thumbnail list";
+  }
+
+  function renderContactManager() {
+    if (!dom.contactManagerList) return;
+    const contacts = state.privateContacts
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    dom.contactManagerList.innerHTML = "";
+    dom.contactManagerCount.textContent = String(contacts.length);
+
+    for (const contact of contacts) {
+      const item = document.createElement("article");
+      item.className = "contact-manager-item";
+      item.classList.toggle("is-inactive", !contact.active);
+
+      const avatar = buildContactAvatar(contact);
+      const copy = document.createElement("div");
+      copy.className = "contact-manager-copy";
+      const name = document.createElement("strong");
+      name.textContent = contact.displayName;
+      const email = document.createElement("span");
+      email.textContent = contact.email || "No email";
+      copy.appendChild(name);
+      copy.appendChild(email);
+
+      const actions = document.createElement("div");
+      actions.className = "contact-manager-actions";
+
+      const edit = document.createElement("button");
+      edit.className = "ghost-button";
+      edit.type = "button";
+      edit.innerHTML = '<i data-lucide="pen-line"></i><span>Edit</span>';
+      edit.addEventListener("click", () => loadContactIntoForm(contact));
+
+      const remove = document.createElement("button");
+      remove.className = "danger-button";
+      remove.type = "button";
+      remove.innerHTML = '<i data-lucide="trash-2"></i><span>Delete</span>';
+      remove.addEventListener("click", () => deleteContactFromManager(contact));
+
+      actions.appendChild(edit);
+      actions.appendChild(remove);
+      item.appendChild(avatar);
+      item.appendChild(copy);
+      item.appendChild(actions);
+      dom.contactManagerList.appendChild(item);
+    }
+
+    refreshIcons();
+  }
+
   function checkAlarms() {
     const now = new Date();
     const due = state.events
@@ -1179,10 +1491,10 @@ import {
     const payload = {
       action: "saveRecipient",
       recipient: {
+        id: form.id.value.trim(),
         displayName: form.displayName.value.trim(),
         email: form.email.value.trim(),
         avatarUrl: form.avatarUrl.value.trim(),
-        avatarFile: form.avatarFile.files && form.avatarFile.files[0] ? form.avatarFile.files[0] : null,
         tags: form.tags.value.trim(),
         active: true
       }
@@ -1198,19 +1510,44 @@ import {
 
   async function submitDisableRecipient() {
     const form = dom.recipientForm;
-    if (!form.reportValidity()) return;
+    const id = form.id.value.trim();
+    const email = form.email.value.trim();
+    if (!id && !form.reportValidity()) return;
+
+    const ok = window.confirm("Disable this contact? Future event emails will not be sent to this contact.");
+    if (!ok) return;
 
     const payload = {
       action: "deleteRecipient",
-      email: form.email.value.trim()
+      id,
+      email
     };
 
     if (firebaseMode) {
-      await disableFirebaseRecipient(payload.email);
+      await disableFirebaseRecipient(payload);
       return;
     }
 
     submitToAppsScript(payload);
+  }
+
+  async function submitDeleteContact() {
+    const id = dom.recipientForm.id.value.trim();
+    const email = dom.recipientForm.email.value.trim();
+    if (!id && !email) {
+      showAdminMessage("Load or enter a contact before deleting.", false);
+      return;
+    }
+
+    const ok = window.confirm("Permanently delete this contact and remove it from events/groups? This cannot be undone.");
+    if (!ok) return;
+
+    if (firebaseMode) {
+      await deleteFirebaseContact({ id, email });
+      return;
+    }
+
+    showAdminMessage("Hard delete contact is only available in Firebase mode.", false);
   }
 
   async function submitGroupForm(event) {
@@ -1241,6 +1578,9 @@ import {
       showAdminMessage("Enter the Group ID to disable a group.", false);
       return;
     }
+
+    const ok = window.confirm(`Disable group "${id}"? Event emails will no longer expand through this group.`);
+    if (!ok) return;
 
     if (firebaseMode) {
       await disableFirebaseGroup(id);
@@ -1289,6 +1629,14 @@ import {
       note: form.note.value.trim()
     };
 
+    if (!payload.id) {
+      showAdminMessage("Enter the Event ID to mark done.", false);
+      return;
+    }
+
+    const ok = window.confirm(`Mark event "${payload.id}" done for this cycle?`);
+    if (!ok) return;
+
     if (firebaseMode) {
       await completeFirebaseCycle(payload.id, payload.note);
       return;
@@ -1304,6 +1652,14 @@ import {
       action: "deleteEvent",
       id: form.id.value.trim()
     };
+
+    if (!payload.id) {
+      showAdminMessage("Enter the Event ID to archive.", false);
+      return;
+    }
+
+    const ok = window.confirm(`Archive event "${payload.id}"? It will stop showing and stop reminders.`);
+    if (!ok) return;
 
     if (firebaseMode) {
       await archiveFirebaseEvent(payload.id);
@@ -1436,10 +1792,9 @@ import {
       const email = String(input.email || "").trim().toLowerCase();
       if (!isValidEmail(email)) throw new Error("A valid Gmail address is required.");
 
-      const id = contactDocumentId(email);
+      const id = makeDocumentId(input.id || contactDocumentId(email), "rec");
       const displayName = String(input.displayName || email.split("@")[0]).trim().slice(0, 80);
-      const uploadedAvatarUrl = await uploadContactAvatarIfNeeded(id, input.avatarFile);
-      const avatarUrl = uploadedAvatarUrl || sanitizePublicUrl(input.avatarUrl || "");
+      const avatarUrl = sanitizeAvatarPath(input.avatarUrl || "");
       const tags = String(input.tags || "").trim().slice(0, 200);
       const tagsArray = parseTags(tags);
       const initials = initialsForName(displayName).slice(0, 3).toUpperCase();
@@ -1476,39 +1831,18 @@ import {
       );
       await batch.commit();
       dom.recipientForm.reset();
+      renderAvatarGallery("");
+      toggleAvatarPicker(false);
       return "Gmail contact saved.";
     });
   }
 
-  async function uploadContactAvatarIfNeeded(contactId, file) {
-    if (!file) return "";
-    if (!firebaseStorage) throw new Error("Firebase Storage is not initialized. Check storageBucket in config.js.");
-
-    const maxBytes = Number(config.avatarMaxBytes) || 2 * 1024 * 1024;
-    if (file.size > maxBytes) {
-      throw new Error(`Avatar image is too large. Max size is ${Math.round(maxBytes / 1024 / 1024)} MB.`);
-    }
-
-    const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-    if (!allowedTypes.has(file.type)) {
-      throw new Error("Avatar image must be PNG, JPG, WEBP, or GIF.");
-    }
-
-    const extension = avatarExtensionForMime(file.type);
-    const ref = storageRef(firebaseStorage, `contact-avatars/${contactId}/avatar.${extension}`);
-    await uploadBytes(ref, file, {
-      contentType: file.type,
-      cacheControl: "public,max-age=3600"
-    });
-    return getDownloadURL(ref);
-  }
-
-  async function disableFirebaseRecipient(emailInput) {
+  async function disableFirebaseRecipient(input) {
     await runFirebaseAdminAction("Disabling contact...", async () => {
-      const email = String(emailInput || "").trim().toLowerCase();
-      if (!isValidEmail(email)) throw new Error("A valid Gmail address is required.");
+      const email = String(input.email || "").trim().toLowerCase();
+      const id = String(input.id || "").trim() || contactDocumentId(email);
+      if (!id) throw new Error("Contact ID is required.");
 
-      const id = contactDocumentId(email);
       const batch = writeBatch(firestore);
       const updates = {
         active: false,
@@ -1520,7 +1854,55 @@ import {
       batch.set(doc(firestore, "publicContacts", id), Object.assign({ id }, updates), { merge: true });
       await batch.commit();
       dom.recipientForm.reset();
+      renderAvatarGallery("");
+      toggleAvatarPicker(false);
       return "Gmail contact disabled.";
+    });
+  }
+
+  async function deleteFirebaseContact(input) {
+    await runFirebaseAdminAction("Deleting contact...", async () => {
+      const email = String(input.email || "").trim().toLowerCase();
+      const id = String(input.id || "").trim() || contactDocumentId(email);
+      if (!id) throw new Error("Contact ID is required.");
+
+      const [eventsSnapshot, groupsSnapshot, publicGroupsSnapshot] = await Promise.all([
+        getDocs(query(collection(firestore, "events"), where("recipientIds", "array-contains", id))),
+        getDocs(query(collection(firestore, "groups"), where("contactIds", "array-contains", id))),
+        getDocs(query(collection(firestore, "publicGroups"), where("contactIds", "array-contains", id)))
+      ]);
+
+      const batch = writeBatch(firestore);
+      batch.delete(doc(firestore, "contacts", id));
+      batch.delete(doc(firestore, "publicContacts", id));
+
+      eventsSnapshot.docs.forEach((snapshot) => {
+        batch.update(snapshot.ref, {
+          recipientIds: arrayRemove(id),
+          updatedAt: serverTimestamp(),
+          updatedBy: currentAdminEmail()
+        });
+      });
+      groupsSnapshot.docs.forEach((snapshot) => {
+        batch.update(snapshot.ref, {
+          contactIds: arrayRemove(id),
+          updatedAt: serverTimestamp(),
+          updatedBy: currentAdminEmail()
+        });
+      });
+      publicGroupsSnapshot.docs.forEach((snapshot) => {
+        batch.update(snapshot.ref, {
+          contactIds: arrayRemove(id),
+          updatedAt: serverTimestamp(),
+          updatedBy: currentAdminEmail()
+        });
+      });
+
+      await batch.commit();
+      dom.recipientForm.reset();
+      renderAvatarGallery("");
+      toggleAvatarPicker(false);
+      return "Contact deleted and removed from events/groups.";
     });
   }
 
@@ -1770,6 +2152,8 @@ import {
       }
       if (data.action === "saveRecipient" || data.action === "deleteRecipient") {
         dom.recipientForm.reset();
+        renderAvatarGallery("");
+        toggleAvatarPicker(false);
       }
       if (data.action === "deleteEvent") {
         dom.archiveEventForm.reset();
@@ -1861,6 +2245,8 @@ import {
     }
 
     dom.recipientForm.reset();
+    renderAvatarGallery("");
+    toggleAvatarPicker(false);
     openAdminDialog("contact");
     showAdminMessage("New contact form is ready.", true);
   }
@@ -1884,6 +2270,24 @@ import {
     dom.adminMessage.classList.add("is-visible");
     dom.adminMessage.classList.toggle("is-ok", ok === true);
     dom.adminMessage.classList.toggle("is-error", ok === false);
+  }
+
+  function loadContactIntoForm(contact) {
+    openAdminDialog("contact");
+    dom.recipientForm.id.value = contact.id || "";
+    dom.recipientForm.displayName.value = contact.displayName || "";
+    dom.recipientForm.email.value = contact.email || "";
+    dom.recipientForm.avatarUrl.value = contact.avatarUrl || "";
+    dom.recipientForm.tags.value = Array.isArray(contact.tags) ? contact.tags.join(", ") : String(contact.tags || "");
+    renderAvatarGallery(contact.avatarUrl || "");
+    toggleAvatarPicker(false);
+    showAdminMessage(`Editing contact "${contact.displayName}".`, true);
+  }
+
+  async function deleteContactFromManager(contact) {
+    const ok = window.confirm(`Permanently delete "${contact.displayName}" and remove it from events/groups? This cannot be undone.`);
+    if (!ok) return;
+    await deleteFirebaseContact(contact);
   }
 
   function loadEventIntoForm(event) {
@@ -1947,6 +2351,9 @@ import {
       showAdminMessage("Login first to mark this event done.", false);
       return;
     }
+
+    const ok = window.confirm(`Mark "${event.title}" done for this cycle?`);
+    if (!ok) return;
 
     if (firebaseMode) {
       await completeFirebaseCycle(event.id, "");
@@ -2385,18 +2792,13 @@ import {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
   }
 
-  function sanitizePublicUrl(value) {
+  function sanitizeAvatarPath(value) {
     const text = String(value || "").trim();
     if (!text) return "";
-    if (/^https?:\/\/[^\s]+$/i.test(text)) return text.slice(0, 1000);
+    if (text.includes("..") || text.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(text)) return "";
+    if (/^images\/[A-Za-z0-9._%/() -]+\.(jpe?g|png|webp|gif)$/i.test(text)) return text.slice(0, 1000);
+    if (/^[A-Za-z0-9._%/() -]+\.(jpe?g|png|webp|gif)$/i.test(text)) return text.slice(0, 1000);
     return "";
-  }
-
-  function avatarExtensionForMime(mimeType) {
-    if (mimeType === "image/jpeg") return "jpg";
-    if (mimeType === "image/webp") return "webp";
-    if (mimeType === "image/gif") return "gif";
-    return "png";
   }
 
   function pad(value) {
