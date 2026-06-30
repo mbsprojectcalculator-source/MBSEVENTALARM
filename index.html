@@ -333,6 +333,11 @@
           <h3>Gmail contacts</h3>
 
           <label>
+            Contact ID
+            <input name="id" type="text" placeholder="Auto for new contact" readonly>
+          </label>
+
+          <label>
             Contact name
             <input name="displayName" type="text" maxlength="80" placeholder="Optional display name">
           </label>
@@ -342,15 +347,27 @@
             <input name="email" type="email" placeholder="name@gmail.com" required>
           </label>
 
-          <label>
-            Avatar URL
-            <input name="avatarUrl" type="url" placeholder="Optional image URL">
-          </label>
-
-          <label>
-            Avatar image
-            <input id="avatarFile" name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-          </label>
+          <div class="avatar-picker-field">
+            <span class="field-label">Avatar</span>
+            <input name="avatarUrl" type="hidden">
+            <div class="avatar-picker-row">
+              <button id="avatarPickerToggle" class="avatar-picker-toggle" type="button" aria-expanded="false" aria-controls="avatarPickerPanel">
+                <span id="avatarPreview" class="contact-avatar avatar-preview avatar-fallback">?</span>
+                <span class="avatar-picker-copy">
+                  <strong id="avatarPickerLabel">Choose avatar</strong>
+                  <span id="avatarPickerPath">No avatar selected</span>
+                </span>
+                <i data-lucide="chevron-down"></i>
+              </button>
+              <button id="clearAvatarButton" class="icon-button" type="button" title="Clear avatar">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div id="avatarPickerPanel" class="avatar-picker-panel is-hidden">
+              <div id="avatarGallery" class="avatar-gallery" aria-label="Avatar choices"></div>
+              <p id="avatarGalleryEmpty" class="form-hint">No avatar images available yet.</p>
+            </div>
+          </div>
 
           <label>
             Tags
@@ -366,6 +383,18 @@
               <i data-lucide="user-x"></i>
               <span>Disable Gmail</span>
             </button>
+            <button id="deleteContactButton" class="danger-button" type="button">
+              <i data-lucide="trash-2"></i>
+              <span>Delete contact</span>
+            </button>
+          </div>
+
+          <div class="contact-manager">
+            <div class="contact-picker-head">
+              <span>Contacts</span>
+              <span id="contactManagerCount">0</span>
+            </div>
+            <div id="contactManagerList" class="contact-manager-list"></div>
           </div>
         </form>
 

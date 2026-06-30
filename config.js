@@ -17,5 +17,13 @@ window.ALARM_REMINDER_CONFIG = {
   timeZoneOffset: "+08:00",
   requestTimeoutMs: 60000,
   refreshMs: 60000,
-  alarmWindowMinutes: 60
+  alarmWindowMinutes: 60,
+  githubImages: {
+    owner: "",
+    repo: "",
+    branch: "main",
+    directory: "images",
+    apiUrl: ""
+  },
+  avatarChoices: []
 };
