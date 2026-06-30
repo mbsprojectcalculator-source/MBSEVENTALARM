@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Alarm Reminder</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <i data-lucide="bell-ring"></i>
+          </span>
+          <div>
+            <h1>Alarm Reminder</h1>
+            <p id="clockLabel">Asia/Singapore</p>
+          </div>
+        </div>
+      </header>
+
+      <aside id="sideToolbar" class="side-toolbar" aria-label="Tools">
+        <button id="toolbarToggleButton" class="toolbar-toggle" type="button" aria-label="Open tools" aria-expanded="false">
+          <i data-lucide="chevron-left"></i>
+        </button>
+        <div class="toolbar-panel">
+          <div class="toolbar-section">
+            <p class="eyebrow">Tools</p>
+            <div class="topbar-meta">
+              <span id="connectionStatus" class="status-pill status-muted">Not connected</span>
+              <span id="authStatus" class="status-pill status-muted">Guest</span>
+            </div>
+            <div class="topbar-buttons">
+              <button id="soundButton" class="icon-button" type="button" title="Enable alarm sound">
+                <i data-lucide="volume-2"></i>
+                <span>Sound</span>
+              </button>
+              <button id="refreshButton" class="icon-button" type="button" title="Refresh events">
+                <i data-lucide="refresh-cw"></i>
+                <span>Refresh</span>
+              </button>
+              <button id="addEventButton" class="primary-button" type="button">
+                <i data-lucide="plus"></i>
+                <span>Event</span>
+              </button>
+              <button id="adminButton" class="primary-button" type="button">
+                <i data-lucide="lock-keyhole"></i>
+                <span>Login</span>
+              </button>
+            </div>
+          </div>
+
+          <section id="systemStatusPanel" class="status-hud compact-status" aria-live="polite">
+            <div class="status-hud-head">
+              <div>
+                <p class="eyebrow">System</p>
+                <h3 id="systemStatusTitle">Waiting</h3>
+              </div>
+              <span id="systemStatusBadge" class="status-pill status-muted">Setup</span>
+            </div>
+            <div class="status-meter">
+              <span id="systemPulse" class="system-pulse"></span>
+              <span id="systemStatusDetail">No backend status loaded yet.</span>
+            </div>
+            <div class="status-mini-grid">
+              <div>
+                <dt>Check</dt>
+                <dd id="systemLastCheck">-</dd>
+              </div>
+              <div>
+                <dt>Trigger</dt>
+                <dd id="systemTrigger">-</dd>
+              </div>
+              <div>
+                <dt>Quota</dt>
+                <dd id="systemQuota">-</dd>
+              </div>
+              <div>
+                <dt>Today</dt>
+                <dd id="systemSentToday">-</dd>
+              </div>
+            </div>
+            <span id="systemCoverage" class="is-hidden">-</span>
+            <span id="systemLastRun" class="is-hidden">-</span>
+            <p id="systemLastError" class="status-error-line is-hidden"></p>
+          </section>
+
+          <div id="setupNotice" class="notice toolbar-notice">
+            <i data-lucide="plug-zap"></i>
+            <span>Connect your Apps Script Web App URL in config.js to load events.</span>
+          </div>
+        </div>
+      </aside>
+
+      <main>
+        <section id="alarmPanel" class="alarm-panel is-hidden" aria-live="assertive">
+          <div class="alarm-copy">
+            <span class="alarm-icon" aria-hidden="true">
+              <i data-lucide="siren"></i>
+            </span>
+            <div>
+              <p class="eyebrow">Active alarm</p>
+              <h2 id="alarmTitle">Reminder due</h2>
+              <p id="alarmMeta"></p>
+            </div>
+          </div>
+          <button id="dismissAlarmButton" class="danger-button" type="button">
+            <i data-lucide="check"></i>
+            <span>Dismiss</span>
+          </button>
+        </section>
+
+        <section class="workspace">
+          <div class="timeline-head">
+            <div>
+              <p class="eyebrow">Public events</p>
+              <h2>Upcoming reminders</h2>
+            </div>
+            <div class="summary-row">
+              <span id="eventCount">0 events</span>
+              <span id="lastUpdated">Never loaded</span>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="calendar-board">
+              <div class="calendar-head">
+                <div>
+                  <p class="eyebrow">Calendar</p>
+                  <h2 id="calendarTitle">Month</h2>
+                </div>
+                <div class="calendar-actions">
+                  <button id="calendarPrevButton" class="icon-only" type="button" title="Previous month">
+                    <i data-lucide="chevron-left"></i>
+                  </button>
+                  <button id="calendarTodayButton" class="ghost-button" type="button">
+                    <i data-lucide="calendar-days"></i>
+                    <span>Today</span>
+                  </button>
+                  <button id="calendarNextButton" class="icon-only" type="button" title="Next month">
+                    <i data-lucide="chevron-right"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="calendar-weekdays" aria-hidden="true">
+                <span>Sun</span>
+                <span>Mon</span>
+                <span>Tue</span>
+                <span>Wed</span>
+                <span>Thu</span>
+                <span>Fri</span>
+                <span>Sat</span>
+              </div>
+              <div id="calendarGrid" class="calendar-grid" aria-label="Event calendar"></div>
+              <div id="calendarDetail" class="calendar-detail is-hidden" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <div id="eventList" class="event-grid" aria-live="polite"></div>
+          <div id="emptyState" class="empty-state">
+            <i data-lucide="calendar-clock"></i>
+            <h3>No public events yet</h3>
+            <p>Use Admin to add the first reminder after connecting Apps Script.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="adminDialog" class="admin-dialog">
+      <form method="dialog" class="dialog-titlebar">
+        <div>
+          <p class="eyebrow">Protected tools</p>
+          <h2>Admin</h2>
+        </div>
+        <button class="icon-only" type="submit" title="Close">
+          <i data-lucide="x"></i>
+        </button>
+      </form>
+
+      <div id="adminMessage" class="admin-message" role="status"></div>
+
+      <form id="loginForm" class="session-panel">
+        <label>
+          Admin password
+          <input name="password" type="password" autocomplete="current-password">
+        </label>
+        <button class="primary-button" type="submit">
+          <i data-lucide="log-in"></i>
+          <span>Login</span>
+        </button>
+        <button id="logoutButton" class="ghost-button" type="button">
+          <i data-lucide="log-out"></i>
+          <span>Logout</span>
+        </button>
+      </form>
+
+      <div class="admin-grid">
+        <form id="eventForm" class="tool-panel">
+          <h3>Event</h3>
+
+          <label>
+            Event ID
+            <input name="id" type="text" placeholder="Leave empty for new event">
+          </label>
+
+          <label>
+            Title
+            <input name="title" type="text" maxlength="120" required>
+          </label>
+
+          <label>
+            Details / renewal notes
+            <textarea name="details" rows="7" maxlength="6000" placeholder="Period: 01/07/2026 - 30/06/2027&#10;1) MMG-WAREHOUSE (Branch Code: WH)&#10;2) ..."></textarea>
+          </label>
+
+          <div class="split-fields">
+            <label>
+              Date
+              <input name="eventDate" type="date" required>
+            </label>
+            <label>
+              Time
+              <input name="eventTime" type="time" required>
+            </label>
+          </div>
+
+          <fieldset class="segmented-field">
+            <legend>Repeat</legend>
+            <label>
+              <input type="radio" name="recurrence" value="none" checked>
+              <span>Once</span>
+            </label>
+            <label>
+              <input type="radio" name="recurrence" value="yearly">
+              <span>Every year</span>
+            </label>
+          </fieldset>
+
+          <div class="split-fields">
+            <label>
+              Email starts
+              <select name="leadPreset">
+                <option value="10">10 minutes</option>
+                <option value="60">1 hour</option>
+                <option value="1440">1 day</option>
+                <option value="10080">1 week</option>
+                <option value="20160" selected>2 weeks</option>
+                <option value="43200">30 days</option>
+                <option value="86400">60 days</option>
+                <option value="129600">90 days</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label id="customLeadWrap" class="is-hidden">
+              Custom minutes
+              <input name="leadCustom" type="number" min="0" max="525600" step="1" value="20160">
+            </label>
+          </div>
+
+          <div class="split-fields">
+            <label>
+              Email repeat
+              <select name="frequencyPreset">
+                <option value="0">Once</option>
+                <option value="1" selected>Every day</option>
+                <option value="7">Every week</option>
+                <option value="custom">Custom days</option>
+              </select>
+            </label>
+            <label id="customFrequencyWrap" class="is-hidden">
+              Custom days
+              <input name="frequencyCustom" type="number" min="1" max="365" step="1" value="1">
+            </label>
+          </div>
+
+          <label>
+            Recipient tags
+            <input name="recipientTags" type="text" placeholder="Optional, comma separated">
+          </label>
+
+          <div class="toggle-row">
+            <label>
+              <input name="soundEnabled" type="checkbox" checked>
+              <span>Alarm sound</span>
+            </label>
+            <label>
+              <input name="flashEnabled" type="checkbox" checked>
+              <span>Flash alert</span>
+            </label>
+          </div>
+
+          <div class="form-actions">
+            <button class="primary-button" type="submit">
+              <i data-lucide="save"></i>
+              <span>Save event</span>
+            </button>
+            <button id="clearEventFormButton" class="ghost-button" type="button">
+              <i data-lucide="eraser"></i>
+              <span>Clear</span>
+            </button>
+          </div>
+        </form>
+
+        <form id="recipientForm" class="tool-panel">
+          <h3>Gmail contacts</h3>
+
+          <label>
+            Contact name
+            <input name="displayName" type="text" maxlength="80" placeholder="Optional display name">
+          </label>
+
+          <label>
+            Gmail address
+            <input name="email" type="email" placeholder="name@gmail.com" required>
+          </label>
+
+          <label>
+            Avatar URL
+            <input name="avatarUrl" type="url" placeholder="Optional image URL">
+          </label>
+
+          <label>
+            Tags
+            <input name="tags" type="text" placeholder="Optional, comma separated">
+          </label>
+
+          <div class="form-actions">
+            <button class="primary-button" type="submit">
+              <i data-lucide="user-plus"></i>
+              <span>Save contact</span>
+            </button>
+            <button id="disableRecipientButton" class="ghost-button" type="button">
+              <i data-lucide="user-x"></i>
+              <span>Disable Gmail</span>
+            </button>
+          </div>
+        </form>
+
+        <form id="completeCycleForm" class="tool-panel compact-panel">
+          <h3>Complete cycle</h3>
+
+          <label>
+            Event ID
+            <input name="id" type="text" required>
+          </label>
+
+          <label>
+            Done note
+            <textarea name="note" rows="3" maxlength="1000" placeholder="Optional, e.g. renewed and submitted"></textarea>
+          </label>
+
+          <button class="primary-button" type="submit" formaction="complete">
+            <i data-lucide="circle-check"></i>
+            <span>Mark done</span>
+          </button>
+        </form>
+
+        <form id="archiveEventForm" class="tool-panel compact-panel">
+          <h3>Archive event</h3>
+
+          <label>
+            Event ID
+            <input name="id" type="text" required>
+          </label>
+
+          <button class="danger-button" type="submit">
+            <i data-lucide="archive"></i>
+            <span>Archive</span>
+          </button>
+        </form>
+      </div>
+    </dialog>
+
+    <form id="bridgeForm" class="bridge-form" method="post" target="appsScriptFrame">
+      <input id="bridgePayload" name="payload" type="hidden">
+    </form>
+    <iframe class="bridge-frame" name="appsScriptFrame" title="Apps Script response"></iframe>
+
+    <template id="eventCardTemplate">
+      <article class="event-card">
+        <div class="event-card-head">
+          <div>
+            <p class="event-id"></p>
+            <h3></h3>
+          </div>
+          <span class="repeat-badge"></span>
+        </div>
+        <dl>
+          <div>
+            <dt>Event time</dt>
+            <dd class="event-time"></dd>
+          </div>
+          <div>
+            <dt>Email reminder</dt>
+            <dd class="lead-time"></dd>
+          </div>
+        </dl>
+        <p class="event-details"></p>
+        <div class="recipient-strip" aria-label="Reminder contacts"></div>
+        <div class="card-actions">
+          <button class="primary-button complete-event-button" type="button">
+            <i data-lucide="circle-check"></i>
+            <span>Done</span>
+          </button>
+          <button class="danger-button archive-event-button" type="button">
+            <i data-lucide="archive"></i>
+            <span>Archive</span>
+          </button>
+          <button class="ghost-button load-event-button" type="button">
+            <i data-lucide="pen-line"></i>
+            <span>Load</span>
+          </button>
+          <button class="icon-button copy-id-button" type="button">
+            <i data-lucide="copy"></i>
+            <span>Copy ID</span>
+          </button>
+        </div>
+      </article>
+    </template>
+
+    <script src="config.js"></script>
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
