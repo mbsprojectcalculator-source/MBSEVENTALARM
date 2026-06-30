@@ -53,6 +53,7 @@ import {
   const state = {
     events: [],
     publicContacts: [],
+    publicGroups: [],
     systemStatus: null,
     calendarMonth: startOfMonth(new Date()),
     selectedCalendarDate: "",
@@ -116,6 +117,8 @@ import {
     dom.clockLabel = document.getElementById("clockLabel");
     dom.refreshButton = document.getElementById("refreshButton");
     dom.addEventButton = document.getElementById("addEventButton");
+    dom.addContactButton = document.getElementById("addContactButton");
+    dom.addGroupButton = document.getElementById("addGroupButton");
     dom.adminButton = document.getElementById("adminButton");
     dom.soundButton = document.getElementById("soundButton");
     dom.adminDialog = document.getElementById("adminDialog");
@@ -124,14 +127,26 @@ import {
     dom.logoutButton = document.getElementById("logoutButton");
     dom.eventForm = document.getElementById("eventForm");
     dom.recipientForm = document.getElementById("recipientForm");
+    dom.groupForm = document.getElementById("groupForm");
     dom.completeCycleForm = document.getElementById("completeCycleForm");
     dom.archiveEventForm = document.getElementById("archiveEventForm");
     dom.clearEventFormButton = document.getElementById("clearEventFormButton");
+    dom.deleteEventButton = document.getElementById("deleteEventButton");
     dom.disableRecipientButton = document.getElementById("disableRecipientButton");
+    dom.disableGroupButton = document.getElementById("disableGroupButton");
     dom.bridgeForm = document.getElementById("bridgeForm");
     dom.bridgePayload = document.getElementById("bridgePayload");
     dom.customLeadWrap = document.getElementById("customLeadWrap");
     dom.customFrequencyWrap = document.getElementById("customFrequencyWrap");
+    dom.recipientPicker = document.getElementById("recipientPicker");
+    dom.recipientPickerCount = document.getElementById("recipientPickerCount");
+    dom.recipientPickerEmpty = document.getElementById("recipientPickerEmpty");
+    dom.groupPicker = document.getElementById("groupPicker");
+    dom.groupPickerCount = document.getElementById("groupPickerCount");
+    dom.groupPickerEmpty = document.getElementById("groupPickerEmpty");
+    dom.groupContactPicker = document.getElementById("groupContactPicker");
+    dom.groupContactPickerCount = document.getElementById("groupContactPickerCount");
+    dom.groupContactPickerEmpty = document.getElementById("groupContactPickerEmpty");
     dom.eventList = document.getElementById("eventList");
     dom.eventCount = document.getElementById("eventCount");
     dom.lastUpdated = document.getElementById("lastUpdated");
@@ -166,6 +181,8 @@ import {
     dom.toolbarToggleButton.addEventListener("click", toggleSideToolbar);
     dom.adminButton.addEventListener("click", openAdminDialog);
     dom.addEventButton.addEventListener("click", startNewEvent);
+    dom.addContactButton.addEventListener("click", startNewContact);
+    dom.addGroupButton.addEventListener("click", startNewGroup);
     dom.calendarPrevButton.addEventListener("click", () => shiftCalendarMonth(-1));
     dom.calendarNextButton.addEventListener("click", () => shiftCalendarMonth(1));
     dom.calendarTodayButton.addEventListener("click", showCurrentCalendarMonth);
@@ -175,10 +192,13 @@ import {
     dom.dismissAlarmButton.addEventListener("click", dismissActiveAlarms);
     dom.eventForm.addEventListener("submit", submitEventForm);
     dom.recipientForm.addEventListener("submit", submitRecipientForm);
+    dom.groupForm.addEventListener("submit", submitGroupForm);
     dom.completeCycleForm.addEventListener("submit", submitCompleteCycleForm);
     dom.archiveEventForm.addEventListener("submit", submitArchiveForm);
     dom.clearEventFormButton.addEventListener("click", clearEventForm);
+    dom.deleteEventButton.addEventListener("click", submitDeleteEvent);
     dom.disableRecipientButton.addEventListener("click", submitDisableRecipient);
+    dom.disableGroupButton.addEventListener("click", submitDisableGroup);
     dom.eventForm.leadPreset.addEventListener("change", toggleCustomLead);
     dom.eventForm.frequencyPreset.addEventListener("change", toggleCustomFrequency);
     window.addEventListener("message", handleBridgeMessage);
@@ -265,17 +285,20 @@ import {
     setStatus(options.manual ? "Refreshing" : "Loading", "muted");
 
     try {
-      const [eventsSnapshot, contactsSnapshot, systemSnapshot] = await Promise.all([
+      const [eventsSnapshot, contactsSnapshot, groupsSnapshot, systemSnapshot] = await Promise.all([
         getDocs(query(collection(firestore, "events"), where("active", "==", true))),
         getDocs(query(collection(firestore, "publicContacts"), where("active", "==", true))),
+        getDocs(query(collection(firestore, "publicGroups"), where("active", "==", true))),
         getDoc(doc(firestore, "system", "status"))
       ]);
 
       const publicContacts = eventsFromSnapshot(contactsSnapshot).map(normalizePublicContactForStore);
+      const publicGroups = eventsFromSnapshot(groupsSnapshot).map(normalizePublicGroupForStore);
       state.publicContacts = publicContacts;
+      state.publicGroups = publicGroups;
       state.systemStatus = normalizeSystemStatus(systemSnapshot.exists() ? systemSnapshot.data() : null);
       state.events = eventsFromSnapshot(eventsSnapshot)
-        .map((item) => attachPublicContacts(item, publicContacts))
+        .map((item) => attachPublicContacts(item, publicContacts, publicGroups))
         .map(normalizeEvent)
         .sort(sortByNextOccurrence);
 
@@ -283,6 +306,9 @@ import {
       renderSystemStatus();
       renderCalendar();
       renderEvents();
+      renderContactPicker();
+      renderGroupPicker();
+      renderGroupContactPicker();
       checkAlarms();
       setStatus("Firebase", "ok");
       dom.lastUpdated.textContent = `Loaded ${formatShortDateTime(new Date())}`;
@@ -322,18 +348,46 @@ import {
     };
   }
 
-  function attachPublicContacts(event, contacts) {
+  function normalizePublicGroupForStore(group) {
+    const name = String(group.name || group.displayName || "Group").trim();
+    return {
+      id: String(group.id || ""),
+      name,
+      initials: String(group.initials || initialsForName(name)).slice(0, 3).toUpperCase(),
+      contactIds: normalizeRecipientIds(group.contactIds),
+      active: toBoolean(group.active, true)
+    };
+  }
+
+  function attachPublicContacts(event, contacts, groups) {
+    const hasRecipientIds = Array.isArray(event.recipientIds);
+    const hasGroupIds = Array.isArray(event.recipientGroupIds);
+    const recipientIds = normalizeRecipientIds(event.recipientIds);
+    const recipientGroupIds = normalizeRecipientIds(event.recipientGroupIds);
+    const groupSet = new Set(recipientGroupIds);
+    const recipientSet = new Set(recipientIds);
     const eventTags = parseTags(event.recipientTags || event.recipientTagsArray);
+
+    if (hasGroupIds) {
+      for (const group of groups || []) {
+        if (!group.active || !groupSet.has(group.id)) continue;
+        for (const contactId of group.contactIds) {
+          recipientSet.add(contactId);
+        }
+      }
+    }
+
     const recipients = contacts
       .filter((contact) => contact.active)
       .filter((contact) => {
-        if (eventTags.length === 0) return true;
+        if (hasRecipientIds || hasGroupIds) return recipientSet.has(contact.id);
+        if (eventTags.length === 0) return false;
         const contactTags = parseTags(contact.tags || contact.tagsArray);
         return eventTags.some((tag) => contactTags.includes(tag));
       })
       .map(normalizeRecipientContact);
 
-    return Object.assign({}, event, { recipients });
+    return Object.assign({}, event, { recipientIds, recipientGroupIds, recipients });
   }
 
   function firebaseErrorMessage(error) {
@@ -406,6 +460,8 @@ import {
       yearlyDay: Number(event.yearlyDay || 0),
       leadMinutes: clampInteger(event.leadMinutes, 0, 525600, 20160),
       reminderFrequencyDays: clampInteger(event.reminderFrequencyDays, 0, 365, 1),
+      recipientIds: normalizeRecipientIds(event.recipientIds),
+      recipientGroupIds: normalizeRecipientIds(event.recipientGroupIds),
       recipientTags: Array.isArray(event.recipientTags || event.recipientTagsArray)
         ? (event.recipientTags || event.recipientTagsArray).join(", ")
         : String(event.recipientTags || ""),
@@ -582,6 +638,7 @@ import {
 
       const actions = document.createElement("div");
       actions.className = "calendar-detail-actions";
+      actions.classList.toggle("is-hidden", !isAdminLoggedIn());
 
       const done = document.createElement("button");
       done.className = "primary-button";
@@ -592,7 +649,7 @@ import {
       const load = document.createElement("button");
       load.className = "ghost-button";
       load.type = "button";
-      load.innerHTML = '<i data-lucide="pen-line"></i><span>Load</span>';
+      load.innerHTML = '<i data-lucide="pen-line"></i><span>Edit</span>';
       load.addEventListener("click", () => loadEventIntoForm(event));
 
       actions.appendChild(done);
@@ -701,7 +758,9 @@ import {
       card.querySelector(".load-event-button").addEventListener("click", () => loadEventIntoForm(event));
       card.querySelector(".complete-event-button").addEventListener("click", () => completeEventFromCard(event));
       card.querySelector(".archive-event-button").addEventListener("click", () => archiveEventFromCard(event));
+      card.querySelector(".delete-event-button").addEventListener("click", () => deleteEventFromCard(event));
       card.querySelector(".copy-id-button").addEventListener("click", () => copyEventId(event.id));
+      card.querySelector(".card-actions").classList.toggle("is-hidden", !isAdminLoggedIn());
       dom.eventList.appendChild(card);
     }
 
@@ -744,6 +803,192 @@ import {
 
       container.appendChild(item);
     }
+  }
+
+  function renderContactPicker(selectedIds = getSelectedRecipientIds()) {
+    if (!dom.recipientPicker) return;
+
+    const selectedSet = new Set(normalizeRecipientIds(selectedIds));
+    const contacts = state.publicContacts
+      .filter((contact) => contact.active)
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    dom.recipientPicker.innerHTML = "";
+    dom.recipientPickerEmpty.classList.toggle("is-hidden", contacts.length > 0);
+
+    for (const contact of contacts) {
+      const label = document.createElement("label");
+      label.className = "contact-option";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "recipientIds";
+      input.value = contact.id;
+      input.checked = selectedSet.has(contact.id);
+      input.addEventListener("change", handleRecipientPickerChange);
+
+      const avatar = buildContactAvatar(contact);
+
+      const name = document.createElement("span");
+      name.className = "contact-option-name";
+      name.textContent = contact.displayName;
+
+      label.appendChild(input);
+      label.appendChild(avatar);
+      label.appendChild(name);
+      dom.recipientPicker.appendChild(label);
+    }
+
+    updateRecipientPickerCount();
+  }
+
+  function buildContactAvatar(contact) {
+    const item = document.createElement("span");
+    item.className = "contact-avatar";
+    item.title = contact.displayName;
+    item.setAttribute("aria-label", contact.displayName);
+
+    if (contact.avatarUrl) {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.loading = "lazy";
+      image.referrerPolicy = "no-referrer";
+      image.src = contact.avatarUrl;
+      image.addEventListener("error", () => {
+        image.remove();
+        item.textContent = contact.initials;
+        item.classList.add("avatar-fallback");
+      });
+      item.appendChild(image);
+    } else {
+      item.textContent = contact.initials;
+      item.classList.add("avatar-fallback");
+    }
+
+    return item;
+  }
+
+  function handleRecipientPickerChange(event) {
+    void event;
+    updateRecipientPickerCount();
+  }
+
+  function updateRecipientPickerCount() {
+    if (!dom.recipientPickerCount) return;
+    const selected = getSelectedRecipientIds();
+    dom.recipientPickerCount.textContent = `${selected.length} selected`;
+  }
+
+  function getSelectedRecipientIds() {
+    if (!dom.recipientPicker) return [];
+    return Array.from(dom.recipientPicker.querySelectorAll('input[name="recipientIds"]:checked'))
+      .map((input) => input.value)
+      .filter(Boolean);
+  }
+
+  function renderGroupPicker(selectedIds = getSelectedGroupIds()) {
+    if (!dom.groupPicker) return;
+
+    const selectedSet = new Set(normalizeRecipientIds(selectedIds));
+    const groups = state.publicGroups
+      .filter((group) => group.active)
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    dom.groupPicker.innerHTML = "";
+    dom.groupPickerEmpty.classList.toggle("is-hidden", groups.length > 0);
+
+    for (const group of groups) {
+      const label = document.createElement("label");
+      label.className = "contact-option group-option";
+      label.title = `ID ${group.id}`;
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "recipientGroupIds";
+      input.value = group.id;
+      input.checked = selectedSet.has(group.id);
+      input.addEventListener("change", updateGroupPickerCount);
+
+      const avatar = document.createElement("span");
+      avatar.className = "contact-avatar avatar-fallback group-avatar";
+      avatar.textContent = group.initials;
+
+      const name = document.createElement("span");
+      name.className = "contact-option-name";
+      name.textContent = `${group.name} (${group.contactIds.length})`;
+
+      label.appendChild(input);
+      label.appendChild(avatar);
+      label.appendChild(name);
+      dom.groupPicker.appendChild(label);
+    }
+
+    updateGroupPickerCount();
+  }
+
+  function updateGroupPickerCount() {
+    if (!dom.groupPickerCount) return;
+    const selected = getSelectedGroupIds();
+    dom.groupPickerCount.textContent = `${selected.length} selected`;
+  }
+
+  function getSelectedGroupIds() {
+    if (!dom.groupPicker) return [];
+    return Array.from(dom.groupPicker.querySelectorAll('input[name="recipientGroupIds"]:checked'))
+      .map((input) => input.value)
+      .filter(Boolean);
+  }
+
+  function renderGroupContactPicker(selectedIds = getSelectedGroupContactIds()) {
+    if (!dom.groupContactPicker) return;
+
+    const selectedSet = new Set(normalizeRecipientIds(selectedIds));
+    const contacts = state.publicContacts
+      .filter((contact) => contact.active)
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    dom.groupContactPicker.innerHTML = "";
+    dom.groupContactPickerEmpty.classList.toggle("is-hidden", contacts.length > 0);
+
+    for (const contact of contacts) {
+      const label = document.createElement("label");
+      label.className = "contact-option";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "groupContactIds";
+      input.value = contact.id;
+      input.checked = selectedSet.has(contact.id);
+      input.addEventListener("change", updateGroupContactPickerCount);
+
+      label.appendChild(input);
+      label.appendChild(buildContactAvatar(contact));
+
+      const name = document.createElement("span");
+      name.className = "contact-option-name";
+      name.textContent = contact.displayName;
+      label.appendChild(name);
+
+      dom.groupContactPicker.appendChild(label);
+    }
+
+    updateGroupContactPickerCount();
+  }
+
+  function updateGroupContactPickerCount() {
+    if (!dom.groupContactPickerCount) return;
+    const selected = getSelectedGroupContactIds();
+    dom.groupContactPickerCount.textContent = `${selected.length} selected`;
+  }
+
+  function getSelectedGroupContactIds() {
+    if (!dom.groupContactPicker) return [];
+    return Array.from(dom.groupContactPicker.querySelectorAll('input[name="groupContactIds"]:checked'))
+      .map((input) => input.value)
+      .filter(Boolean);
   }
 
   function checkAlarms() {
@@ -885,6 +1130,8 @@ import {
       form.frequencyPreset.value === "custom"
         ? clampInteger(form.frequencyCustom.value, 1, 365, 1)
         : Number(form.frequencyPreset.value);
+    const recipientIds = getSelectedRecipientIds();
+    const recipientGroupIds = getSelectedGroupIds();
 
     const payload = {
       action: "saveEvent",
@@ -897,7 +1144,9 @@ import {
         recurrence: form.recurrence.value,
         leadMinutes,
         reminderFrequencyDays,
-        recipientTags: form.recipientTags.value.trim(),
+        recipientIds,
+        recipientGroupIds,
+        recipientTags: "",
         soundEnabled: form.soundEnabled.checked,
         flashEnabled: form.flashEnabled.checked,
         active: true
@@ -949,6 +1198,46 @@ import {
     }
 
     submitToAppsScript(payload);
+  }
+
+  async function submitGroupForm(event) {
+    event.preventDefault();
+    const form = dom.groupForm;
+    const payload = {
+      action: "saveGroup",
+      group: {
+        id: form.id.value.trim(),
+        name: form.name.value.trim(),
+        contactIds: getSelectedGroupContactIds(),
+        active: true
+      }
+    };
+
+    if (firebaseMode) {
+      await saveFirebaseGroup(payload.group);
+      return;
+    }
+
+    submitToAppsScript(payload);
+  }
+
+  async function submitDisableGroup() {
+    const form = dom.groupForm;
+    const id = form.id.value.trim();
+    if (!id) {
+      showAdminMessage("Enter the Group ID to disable a group.", false);
+      return;
+    }
+
+    if (firebaseMode) {
+      await disableFirebaseGroup(id);
+      return;
+    }
+
+    submitToAppsScript({
+      action: "deleteGroup",
+      id
+    });
   }
 
   async function submitLoginForm(event) {
@@ -1011,6 +1300,24 @@ import {
     submitToAppsScript(payload);
   }
 
+  async function submitDeleteEvent() {
+    const id = dom.archiveEventForm.id.value.trim();
+    if (!id) {
+      showAdminMessage("Enter the Event ID to delete.", false);
+      return;
+    }
+
+    const ok = window.confirm(`Permanently delete event "${id}" and its reminder logs? This cannot be undone.`);
+    if (!ok) return;
+
+    if (firebaseMode) {
+      await deleteFirebaseEvent(id);
+      return;
+    }
+
+    showAdminMessage("Hard delete is only available in Firebase mode.", false);
+  }
+
   async function loginWithFirebase() {
     if (!firebaseAuth) {
       showAdminMessage("Firebase Auth is not initialized. Check config.js.", false);
@@ -1057,6 +1364,8 @@ import {
       const eventTime = requireTimeString(input.eventTime);
       const recurrence = input.recurrence === "yearly" ? "yearly" : "none";
       const dateParts = eventDate.split("-").map(Number);
+      const recipientIds = normalizeRecipientIds(input.recipientIds);
+      const recipientGroupIds = normalizeRecipientIds(input.recipientGroupIds);
 
       if (!title) throw new Error("Event title is required.");
 
@@ -1073,6 +1382,8 @@ import {
         yearlyDay: recurrence === "yearly" ? dateParts[2] : 0,
         leadMinutes: clampInteger(input.leadMinutes, 0, 525600, 20160),
         reminderFrequencyDays: clampInteger(input.reminderFrequencyDays, 0, 365, 1),
+        recipientIds,
+        recipientGroupIds,
         recipientTags: String(input.recipientTags || "").trim().slice(0, 200),
         recipientTagsArray: parseTags(input.recipientTags),
         soundEnabled: toBoolean(input.soundEnabled, true),
@@ -1161,6 +1472,63 @@ import {
     });
   }
 
+  async function saveFirebaseGroup(input) {
+    await runFirebaseAdminAction("Saving group...", async () => {
+      const name = String(input.name || "").trim();
+      const contactIds = normalizeRecipientIds(input.contactIds);
+      if (!name) throw new Error("Group name is required.");
+      if (contactIds.length === 0) throw new Error("Choose at least one contact for this group.");
+
+      const id = makeDocumentId(input.id || name, "grp");
+      const groupRef = doc(firestore, "groups", id);
+      const publicRef = doc(firestore, "publicGroups", id);
+      const existing = await getDoc(groupRef);
+      const base = {
+        id,
+        name: name.slice(0, 80),
+        contactIds,
+        active: input.active === undefined ? true : toBoolean(input.active, true),
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+      if (!existing.exists()) {
+        base.createdAt = serverTimestamp();
+      }
+
+      const batch = writeBatch(firestore);
+      batch.set(groupRef, base, { merge: true });
+      batch.set(
+        publicRef,
+        Object.assign({}, base, {
+          initials: initialsForName(name).slice(0, 3).toUpperCase()
+        }),
+        { merge: true }
+      );
+      await batch.commit();
+      dom.groupForm.reset();
+      renderGroupContactPicker([]);
+      return "Gmail group saved.";
+    });
+  }
+
+  async function disableFirebaseGroup(idInput) {
+    await runFirebaseAdminAction("Disabling group...", async () => {
+      const id = makeDocumentId(idInput, "grp");
+      const updates = {
+        active: false,
+        updatedAt: serverTimestamp(),
+        updatedBy: currentAdminEmail()
+      };
+      const batch = writeBatch(firestore);
+      batch.set(doc(firestore, "groups", id), Object.assign({ id }, updates), { merge: true });
+      batch.set(doc(firestore, "publicGroups", id), Object.assign({ id }, updates), { merge: true });
+      await batch.commit();
+      dom.groupForm.reset();
+      renderGroupContactPicker([]);
+      return "Gmail group disabled.";
+    });
+  }
+
   async function completeFirebaseCycle(id, note) {
     await runFirebaseAdminAction("Marking done...", async () => {
       const eventId = String(id || "").trim();
@@ -1223,6 +1591,48 @@ import {
       dom.archiveEventForm.reset();
       return "Event archived.";
     });
+  }
+
+  async function deleteFirebaseEvent(id) {
+    await runFirebaseAdminAction("Deleting event...", async () => {
+      const eventId = String(id || "").trim();
+      if (!eventId) throw new Error("Event ID is required.");
+
+      const [completionSnapshot, emailSnapshot] = await Promise.all([
+        getDocs(query(collection(firestore, "completionLog"), where("eventId", "==", eventId))),
+        getDocs(query(collection(firestore, "emailLog"), where("eventId", "==", eventId)))
+      ]);
+      const refs = [
+        doc(firestore, "events", eventId),
+        ...completionSnapshot.docs.map((snapshot) => snapshot.ref),
+        ...emailSnapshot.docs.map((snapshot) => snapshot.ref)
+      ];
+
+      await deleteFirestoreRefs(refs);
+      dom.archiveEventForm.reset();
+      dom.completeCycleForm.reset();
+      if (dom.eventForm.id.value.trim() === eventId) clearEventForm();
+      return `Event deleted with ${refs.length - 1} related log record${refs.length === 2 ? "" : "s"}.`;
+    });
+  }
+
+  async function deleteFirestoreRefs(refs) {
+    let batch = writeBatch(firestore);
+    let count = 0;
+
+    for (const ref of refs) {
+      batch.delete(ref);
+      count += 1;
+      if (count === 450) {
+        await batch.commit();
+        batch = writeBatch(firestore);
+        count = 0;
+      }
+    }
+
+    if (count > 0) {
+      await batch.commit();
+    }
   }
 
   async function runFirebaseAdminAction(message, action) {
@@ -1352,6 +1762,31 @@ import {
     showAdminMessage("New event form is ready.", true);
   }
 
+  function startNewContact() {
+    if (!isAdminLoggedIn()) {
+      openAdminDialog();
+      showAdminMessage("Login first to add contacts.", false);
+      return;
+    }
+
+    dom.recipientForm.reset();
+    openAdminDialog();
+    showAdminMessage("New contact form is ready.", true);
+  }
+
+  function startNewGroup() {
+    if (!isAdminLoggedIn()) {
+      openAdminDialog();
+      showAdminMessage("Login first to add groups.", false);
+      return;
+    }
+
+    dom.groupForm.reset();
+    renderGroupContactPicker([]);
+    openAdminDialog();
+    showAdminMessage("New group form is ready.", true);
+  }
+
   function showAdminMessage(message, ok) {
     if (!message) return;
     dom.adminMessage.textContent = message;
@@ -1378,7 +1813,8 @@ import {
     dom.eventForm.recurrence.value = event.recurrence;
     dom.eventForm.soundEnabled.checked = event.soundEnabled;
     dom.eventForm.flashEnabled.checked = event.flashEnabled;
-    dom.eventForm.recipientTags.value = event.recipientTags || "";
+    renderGroupPicker(event.recipientGroupIds || []);
+    renderContactPicker(event.recipientIds || []);
 
     const presetValues = ["10", "60", "1440", "10080", "20160", "43200", "86400", "129600"];
     if (presetValues.includes(String(event.leadMinutes))) {
@@ -1455,12 +1891,33 @@ import {
     });
   }
 
+  async function deleteEventFromCard(event) {
+    if (!isAdminLoggedIn()) {
+      openAdminDialog();
+      dom.archiveEventForm.id.value = event.id;
+      showAdminMessage("Login first to delete this event.", false);
+      return;
+    }
+
+    const ok = window.confirm(`Permanently delete "${event.title}" and its reminder logs? This cannot be undone.`);
+    if (!ok) return;
+
+    if (firebaseMode) {
+      await deleteFirebaseEvent(event.id);
+      return;
+    }
+
+    showAdminMessage("Hard delete is only available in Firebase mode.", false);
+  }
+
   function clearEventForm() {
     dom.eventForm.reset();
     dom.eventForm.leadPreset.value = "20160";
     dom.eventForm.frequencyPreset.value = "1";
     toggleCustomLead();
     toggleCustomFrequency();
+    renderGroupPicker([]);
+    renderContactPicker([]);
     setDefaultEventDateTime();
   }
 
@@ -1538,6 +1995,12 @@ import {
     dom.authStatus.classList.toggle("status-muted", !isAdmin);
     dom.loginForm.classList.toggle("is-admin", isAdmin);
     dom.adminButton.querySelector("span").textContent = isAdmin ? "Admin" : "Login";
+    dom.addEventButton.classList.toggle("is-hidden", !isAdmin);
+    dom.addContactButton.classList.toggle("is-hidden", !isAdmin);
+    dom.addGroupButton.classList.toggle("is-hidden", !isAdmin);
+    document.querySelectorAll(".card-actions, .calendar-detail-actions").forEach((element) => {
+      element.classList.toggle("is-hidden", !isAdmin);
+    });
     if (firebaseMode && dom.loginForm.email && !dom.loginForm.email.value) {
       dom.loginForm.email.value = adminEmails[0] || "";
     }
@@ -1804,6 +2267,17 @@ import {
       .split(",")
       .map((tag) => tag.trim().toLowerCase())
       .filter(Boolean);
+  }
+
+  function normalizeRecipientIds(value) {
+    const raw = Array.isArray(value) ? value : String(value || "").split(",");
+    return Array.from(
+      new Set(
+        raw
+          .map((id) => String(id || "").trim())
+          .filter(Boolean)
+      )
+    );
   }
 
   function timestampToIso(value) {

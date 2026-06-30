@@ -44,6 +44,14 @@
                 <i data-lucide="plus"></i>
                 <span>Event</span>
               </button>
+              <button id="addContactButton" class="primary-button" type="button">
+                <i data-lucide="user-plus"></i>
+                <span>Contact</span>
+              </button>
+              <button id="addGroupButton" class="primary-button" type="button">
+                <i data-lucide="users"></i>
+                <span>Group</span>
+              </button>
               <button id="adminButton" class="primary-button" type="button">
                 <i data-lucide="lock-keyhole"></i>
                 <span>Login</span>
@@ -278,10 +286,25 @@
             </label>
           </div>
 
-          <label>
-            Recipient tags
-            <input name="recipientTags" type="text" placeholder="Optional, comma separated">
-          </label>
+          <fieldset class="contact-picker-field">
+            <legend>Email groups</legend>
+            <div class="contact-picker-head">
+              <span id="groupPickerCount">0 selected</span>
+              <span>Groups</span>
+            </div>
+            <div id="groupPicker" class="contact-picker group-picker" aria-label="Email groups"></div>
+            <p id="groupPickerEmpty" class="form-hint">Create groups first, then choose groups for this event.</p>
+          </fieldset>
+
+          <fieldset class="contact-picker-field">
+            <legend>Email contacts</legend>
+            <div class="contact-picker-head">
+              <span id="recipientPickerCount">0 selected</span>
+              <span>Contacts</span>
+            </div>
+            <div id="recipientPicker" class="contact-picker" aria-label="Email contacts"></div>
+            <p id="recipientPickerEmpty" class="form-hint">Add contacts first, then choose who this event should email.</p>
+          </fieldset>
 
           <div class="toggle-row">
             <label>
@@ -341,6 +364,41 @@
           </div>
         </form>
 
+        <form id="groupForm" class="tool-panel">
+          <h3>Gmail groups</h3>
+
+          <label>
+            Group ID
+            <input name="id" type="text" placeholder="Optional, e.g. allbranch">
+          </label>
+
+          <label>
+            Group name
+            <input name="name" type="text" maxlength="80" placeholder="All Branch" required>
+          </label>
+
+          <fieldset class="contact-picker-field">
+            <legend>Group contacts</legend>
+            <div class="contact-picker-head">
+              <span id="groupContactPickerCount">0 selected</span>
+              <span>Members</span>
+            </div>
+            <div id="groupContactPicker" class="contact-picker" aria-label="Group contacts"></div>
+            <p id="groupContactPickerEmpty" class="form-hint">Add contacts before creating a group.</p>
+          </fieldset>
+
+          <div class="form-actions">
+            <button class="primary-button" type="submit">
+              <i data-lucide="save"></i>
+              <span>Save group</span>
+            </button>
+            <button id="disableGroupButton" class="ghost-button" type="button">
+              <i data-lucide="users-round"></i>
+              <span>Disable group</span>
+            </button>
+          </div>
+        </form>
+
         <form id="completeCycleForm" class="tool-panel compact-panel">
           <h3>Complete cycle</h3>
 
@@ -361,17 +419,23 @@
         </form>
 
         <form id="archiveEventForm" class="tool-panel compact-panel">
-          <h3>Archive event</h3>
+          <h3>Archive / delete event</h3>
 
           <label>
             Event ID
             <input name="id" type="text" required>
           </label>
 
-          <button class="danger-button" type="submit">
-            <i data-lucide="archive"></i>
-            <span>Archive</span>
-          </button>
+          <div class="form-actions">
+            <button class="danger-button" type="submit">
+              <i data-lucide="archive"></i>
+              <span>Archive</span>
+            </button>
+            <button id="deleteEventButton" class="danger-button" type="button">
+              <i data-lucide="trash-2"></i>
+              <span>Delete</span>
+            </button>
+          </div>
         </form>
       </div>
     </dialog>
@@ -403,6 +467,10 @@
         <p class="event-details"></p>
         <div class="recipient-strip" aria-label="Reminder contacts"></div>
         <div class="card-actions">
+          <button class="ghost-button load-event-button" type="button">
+            <i data-lucide="pen-line"></i>
+            <span>Edit</span>
+          </button>
           <button class="primary-button complete-event-button" type="button">
             <i data-lucide="circle-check"></i>
             <span>Done</span>
@@ -411,9 +479,9 @@
             <i data-lucide="archive"></i>
             <span>Archive</span>
           </button>
-          <button class="ghost-button load-event-button" type="button">
-            <i data-lucide="pen-line"></i>
-            <span>Load</span>
+          <button class="danger-button delete-event-button" type="button">
+            <i data-lucide="trash-2"></i>
+            <span>Delete</span>
           </button>
           <button class="icon-button copy-id-button" type="button">
             <i data-lucide="copy"></i>
